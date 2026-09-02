@@ -16,7 +16,7 @@ const METHOD_LABEL = {
 };
 
 route('/rates', async (main) => {
-  const all = await api.get('/rates');
+  const [all, ref] = await Promise.all([api.get('/rates'), api.get('/reference')]);
 
   main.innerHTML = `
     <div class="screen-head">
@@ -38,23 +38,25 @@ route('/rates', async (main) => {
     cats.map(c => `<option>${escapeHtml(c)}</option>`).join('');
 
   const columns = [
-    { key: 'description', label: 'Item', kind: 'label', width: '210px' },
-    { key: 'specification', label: 'Specification', kind: 'derived', width: '210px',
-      align: 'left',
-      render: v => `<span class="muted">${escapeHtml(v || '—')}</span>` },
+    { key: 'description', label: 'Item', kind: 'input', text: true, width: '210px',
+      align: 'left' },
+    { key: 'specification', label: 'Specification', kind: 'input', text: true,
+      width: '220px', align: 'left' },
     { key: 'basic_rate', label: 'Basic', unit: '₹', kind: 'input', dp: 2, width: '86px', nullable: true },
     { key: 'laying_rate', label: 'Laying', unit: '₹', kind: 'input', dp: 2, width: '86px', nullable: true },
     { key: 'wastage_pct', label: 'Wastage', kind: 'input', dp: 3, width: '84px', nullable: true,
       render: v => v === null || v === undefined ? '—' : `${(v * 100).toFixed(1)}%`,
       title: 'Per rate, not a global constant. The sheet uses 1.03, 1.05, 1.1 and 1.15.' },
-    { key: 'method', label: 'Build-up', kind: 'derived', width: '140px', align: 'left',
-      render: v => `<span class="tag">${escapeHtml(METHOD_LABEL[v] || v || '—')}</span>` },
-    { key: 'unit', label: 'Unit', kind: 'derived', width: '62px', align: 'left' },
+    { key: 'method', label: 'Build-up', kind: 'select', width: '150px',
+      options: ref.buildup_methods,
+      title: 'How the overall rate is built. Eight methods cover the whole library.' },
+    { key: 'unit', label: 'Unit', kind: 'select', width: '76px', options: ref.units },
     { key: 'overall_rate', label: 'Overall rate', kind: 'derived', dp: 2, width: '116px',
       total: true, flagMissing: true,
       render: (v, r) => v === null || v === undefined
         ? '<span class="tag bad">no rate</span>'
         : (!r.is_priced ? '<span class="tag bad">no rate</span>' : `₹${fmt.n(v, 2)}`) },
+    { key: '_del', label: '', kind: 'delete', width: '34px' },
   ];
 
   function draw() {
@@ -74,7 +76,20 @@ route('/rates', async (main) => {
     createGrid(host, {
       columns, rows, reload: refresh,
       emptyMessage: 'No rates match that filter.',
+      addLabel: 'Add rate',
+      rowName: row => `rate “${row.description}”`,
+      onAdd: () => api.post('/collections/rate-items',
+        { description: 'New rate', unit: 'Sq M', category: 'Finishing' }),
+      onDelete: row => api.send('DELETE', `/collections/rate-items/${row.id}`),
       onCommit: (row, col, value) => {
+        // Identity fields live on the rate item; price fields on its revision.
+        if (['description', 'specification', 'unit', 'category'].includes(col.key)) {
+          return api.send('PATCH', `/collections/rate-items/${row.id}`, { [col.key]: value });
+        }
+        if (col.key === 'method') {
+          return api.send('PATCH', `/collections/rate-revisions/${row.revision_id}`,
+            { method: value });
+        }
         // Wastage is typed as a percentage and stored as a ratio.
         const v = col.key === 'wastage_pct' && value !== null && value > 1 ? value / 100 : value;
         return api.put(`/rates/${row.id}`, { [col.key]: v });

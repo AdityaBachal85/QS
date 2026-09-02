@@ -275,3 +275,29 @@ h4.deriv-h { margin: 16px 0 6px; font-size: 11px; text-transform: uppercase;
 .tile .v { font-size: 21px; font-weight: 640; font-variant-numeric: tabular-nums;
            letter-spacing: -.02em; }
 .tile .s { color: var(--ink-3); font-size: 11.5px; margin-top: 2px; }
+
+/* ---------- row actions ---------- */
+.grid-actions {
+  padding: 9px 12px; border-top: 1px solid var(--line); background: var(--surface-2);
+  display: flex; gap: 8px; align-items: center;
+}
+td.act { background: var(--surface); text-align: center; width: 34px; padding: 0; }
+button.row-del {
+  border: 0; background: none; color: var(--ink-3); cursor: pointer;
+  font-size: 17px; line-height: 1; padding: 2px 6px; border-radius: 4px;
+}
+button.row-del:hover { background: var(--bad-soft); color: var(--bad); }
+td.sel-cell { background: var(--surface); cursor: pointer; padding: 0 8px; }
+td.sel-cell:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+td.sel-cell::after { content: " ⌄"; color: var(--ink-3); font-size: 11px; }
+td.editing select {
+  width: 100%; height: 100%; border: 0; outline: 2px solid var(--accent);
+  outline-offset: -2px; background: #fff; font-size: 12px; padding: 0 4px;
+}
+.add-form {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding: 10px 12px; background: var(--surface-2); border-top: 1px solid var(--line);
+}
+.add-form input, .add-form select {
+  padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line-strong);
+}

@@ -21,6 +21,18 @@ references mixing relative and absolute anchors -- ``E20 = E6``, ``E34 = E20``,
 but ``E23 = $E$9`` (C-32).  Break one link and some rooms follow a change while
 others silently do not.  Here identical rates collapse to one ``rate_item`` that
 every room referencing it shares.
+
+**On merging duplicates.**  Twenty-eight (description, specification) pairs
+appear more than once across the 150-item library, but they are two different
+problems and only one of them is safe to fix automatically:
+
+* **Eight are true duplicates** -- identical description, specification, basic
+  rate, laying rate, wastage and build-up method.  Collapsing them moves no
+  money, so they merge on import and the merge is reported.
+* **Twenty are the same item at genuinely different prices** -- flooring at
+  Rs 45 in one room and Rs 55 in another.  These stay separate.  Merging them
+  would silently re-price rooms, which is the class of mistake this platform
+  exists to prevent, so they are surfaced as a variance instead.
 """
 
 from __future__ import annotations
@@ -29,6 +41,7 @@ import re
 
 from qs_engine.model import (BuildupMethod, FinishSlot, ProjectModel, RateItem,
                              RateRevision, RoomFinishSpec, RoomType)
+from qs_engine.units import UnknownUnitError, parse_unit
 
 from ..ids import IdFactory
 from ..reader import Workbook
@@ -224,7 +237,83 @@ def map_rate_list(wb: Workbook, model: ProjectModel, ids: IdFactory,
         ))
 
     _resolve_links(pending_links, item_by_row, warnings)
+    warnings.extend(merge_exact_duplicates(model))
     return warnings
+
+
+def merge_exact_duplicates(model: ProjectModel) -> list[str]:
+    """Collapse rate items that are identical in every priced field.
+
+    Identical means: same description, same specification, and a revision with
+    the same method, basic rate, laying rate, wastage, frame width and
+    adjustments. Nothing computed changes -- every reference is repointed at the
+    survivor, and the survivor prices exactly as the duplicate did.
+
+    Items that merely share a name are left alone. Those are C-7 territory: the
+    same work at two prices, which needs a QS to decide, not an importer.
+    """
+    survivors: dict[tuple, RateItem] = {}
+    merged: dict[str, str] = {}
+
+    for item in list(model.rate_items):
+        revision = model.current_revision(item.id)
+        if revision is None:
+            continue
+        # The unit goes through the engine's registry so "R M" and "RM" -- the
+        # same unit typed two ways in the sheet -- are recognised as one.
+        try:
+            unit = parse_unit(item.unit).code
+        except UnknownUnitError:
+            unit = item.unit.strip().lower()
+        # An unpriced row computes to zero whatever method and wastage were
+        # inferred from its empty formula, so none of that makes it distinct.
+        # Two unpriced "Skirting" rows are one unpriced Skirting.
+        pricing: tuple = (None,)
+        if revision.is_priced:
+            pricing = (
+                revision.method, revision.basic_rate, revision.laying_rate,
+                revision.wastage_pct, revision.frame_width_m,
+                revision.adjustment_factor, revision.adjustment_constant,
+                revision.constant_value, revision.links_to_rate_item_id,
+            )
+        signature = (
+            " ".join(item.description.split()).lower(),
+            " ".join(item.specification.split()).lower(),
+            unit, *pricing,
+        )
+        keeper = survivors.get(signature)
+        if keeper is None:
+            survivors[signature] = item
+            continue
+        merged[item.id] = keeper.id
+
+    if not merged:
+        return []
+
+    # Repoint everything that referenced a duplicate, then drop it.
+    for spec in model.room_finish_specs:
+        if spec.rate_item_id in merged:
+            spec.rate_item_id = merged[spec.rate_item_id]
+    for opening in model.opening_types:
+        if opening.rate_item_id in merged:
+            opening.rate_item_id = merged[opening.rate_item_id]
+    for revision in model.rate_revisions:
+        if revision.links_to_rate_item_id in merged:
+            revision.links_to_rate_item_id = merged[revision.links_to_rate_item_id]
+    for override in model.project_rates:
+        if override.rate_item_id in merged:
+            override.rate_item_id = merged[override.rate_item_id]
+
+    model.rate_items[:] = [i for i in model.rate_items if i.id not in merged]
+    model.rate_revisions[:] = [r for r in model.rate_revisions
+                               if r.rate_item_id not in merged]
+
+    return [
+        f"Merged {len(merged)} duplicate rate item(s) that were identical in "
+        f"description, specification and every priced field. No amount changes. "
+        f"Rates sharing a name but priced differently were left separate and are "
+        f"reported as variances instead."
+    ]
 
 
 def _resolve_links(pending, item_by_row: dict[int, str],

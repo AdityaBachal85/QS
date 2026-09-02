@@ -28,7 +28,8 @@ from fastapi.staticfiles import StaticFiles
 from qs_engine.model import ProjectModel, RoomOpening
 from qs_engine.params import ParameterSet
 
-from . import service
+from . import crud, service
+from .crud import CrudError
 from .store import Store
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -127,6 +128,48 @@ def get_parameters() -> list[dict[str, Any]]:
     return [{"key": p.key, "value": p.value, "unit": p.unit,
              "description": p.description, "source": p.source,
              "is_named": p.is_named} for p in params]
+
+
+@app.get("/api/reference")
+def get_reference() -> dict[str, Any]:
+    """Everything a dropdown needs.
+
+    The UI never invents an option. Anywhere a value must come from a known set
+    it is chosen from this list, which is why a misspelling cannot enter the
+    model the way ``Vitrfied Skirting`` and ``Membrame`` entered the workbook
+    and broke its lookups (C-34).
+    """
+    from qs_engine.model import (BuildupMethod, FloorType, OpeningKind,
+                                 RoomCategory)
+    model, _ = state.require()
+    return {
+        "room_types": [{"value": t.id, "label": t.name,
+                        "category": t.category.value}
+                       for t in sorted(model.room_types, key=lambda t: t.name)],
+        "room_categories": [{"value": c.value, "label": c.value.title()}
+                            for c in RoomCategory],
+        "floor_types": [{"value": f.value, "label": f.value.title()}
+                        for f in FloorType],
+        "opening_kinds": [{"value": k.value, "label": k.value.replace("_", " ").title()}
+                          for k in OpeningKind],
+        "buildup_methods": [{"value": m.value,
+                             "label": m.value.replace("_", " ")}
+                            for m in BuildupMethod],
+        "units": [{"value": u, "label": u} for u in
+                  ("Sq M", "Sq Ft", "RM", "R Ft", "Cu M", "Nos", "Ton", "Kg", "LS")],
+        "classifications": sorted({u.classification for u in model.unit_types
+                                   if u.classification}),
+        "unit_types": [{"value": u.id, "label": u.code}
+                       for u in sorted(model.unit_types, key=lambda u: u.seq)],
+        "opening_types": [{"value": o.id, "label": f"{o.code} ({o.kind.value})"}
+                          for o in sorted(model.opening_types, key=lambda o: o.code)],
+        "rate_items": [{"value": r.id,
+                        "label": f"{r.description}"
+                                 + (f" — {r.specification}" if r.specification else "")}
+                       for r in sorted(model.rate_items, key=lambda r: r.description)],
+        "finish_slots": [{"value": s.id, "label": s.name}
+                         for s in sorted(model.finish_slots, key=lambda s: s.seq)],
+    }
 
 
 @app.get("/api/validation")
@@ -340,6 +383,76 @@ def set_parameter(key: str, payload: dict = Body(...)) -> dict[str, Any]:
     state.store.log(model.project.id, "project_parameter", key, "value",
                     old, payload["value"], reason=payload.get("reason", ""))
     return _touched()
+
+
+# --------------------------------------------------------------------------
+# Add, rename and delete -- one pair of routes for every collection
+# --------------------------------------------------------------------------
+
+@app.get("/api/collections")
+def list_collections() -> dict[str, Any]:
+    """What can be added, and which of its fields are inputs.
+
+    The UI reads this to build its forms, so a field that is not an input here
+    cannot be offered for editing there.
+    """
+    return {
+        name: {"label": spec.label, "required": list(spec.required),
+               "editable": list(spec.editable)}
+        for name, spec in crud.RESOURCES.items()
+    }
+
+
+@app.post("/api/collections/{name}")
+def create_record(name: str, payload: dict = Body(default={})) -> dict[str, Any]:
+    model, _ = state.require()
+    try:
+        item = crud.create(model, name, payload)
+    except CrudError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    state.store.log(model.project.id, name, item.id, "created", None,
+                    getattr(item, "code", None) or getattr(item, "name", None)
+                    or getattr(item, "label", None) or item.id)
+    return {**_touched(), "id": item.id}
+
+
+@app.patch("/api/collections/{name}/{entity_id}")
+def update_record(name: str, entity_id: str,
+                  payload: dict = Body(...)) -> dict[str, Any]:
+    """Rename or re-point a record. Derived fields are refused."""
+    model, _ = state.require()
+    try:
+        changes = crud.update(model, name, entity_id, payload)
+    except CrudError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    for field, old, new in changes:
+        state.store.log(model.project.id, name, entity_id, field, old, new)
+    return _touched()
+
+
+@app.get("/api/collections/{name}/{entity_id}/usage")
+def record_usage(name: str, entity_id: str) -> dict[str, Any]:
+    """What would refuse a delete -- so the UI can warn before asking."""
+    model, _ = state.require()
+    try:
+        return {"blocked_by": crud.blockers(model, name, entity_id)}
+    except CrudError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.delete("/api/collections/{name}/{entity_id}")
+def delete_record(name: str, entity_id: str) -> dict[str, Any]:
+    """Delete a record, taking its own children but never a record in use."""
+    model, _ = state.require()
+    try:
+        removed = crud.delete(model, name, entity_id)
+    except CrudError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    state.store.log(model.project.id, name, entity_id, "deleted",
+                    ", ".join(f"{n} {k}" for k, n in removed.items()), None)
+    return {**_touched(), "removed": removed}
 
 
 # --------------------------------------------------------------------------

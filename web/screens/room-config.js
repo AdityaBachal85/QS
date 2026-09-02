@@ -11,12 +11,18 @@ import { createGrid } from '../grid.js';
 import { escapeHtml } from '../panel.js';
 
 route('/room-config', async (main) => {
-  const data = await api.get('/room-config');
+  const [data, ref] = await Promise.all([
+    api.get('/room-config'), api.get('/reference'),
+  ]);
   const shown = data.unit_types.filter(u => !u.is_common_area || u.total > 0);
 
   const columns = [
-    { key: 'name', label: 'Floor', kind: 'label', width: '150px' },
-    { key: 'floor_to_floor_ht', label: 'Ht', unit: 'm', kind: 'input', dp: 2, width: '54px',
+    { key: 'name', label: 'Floor', kind: 'input', text: true, width: '150px',
+      align: 'left', title: 'Rename a floor by typing over it.' },
+    { key: 'floor_type', label: 'Type', kind: 'select', width: '100px',
+      options: ref.floor_types },
+    { key: 'floor_to_floor_ht', label: 'Ht', unit: 'm', kind: 'input', dp: 2,
+      width: '56px',
       title: 'Floor-to-floor height. Drives every wall quantity on this floor.' },
     ...shown.map(u => ({
       key: u.id, label: u.code, unit: u.classification, kind: 'input', dp: 0,
@@ -27,19 +33,23 @@ route('/room-config', async (main) => {
     { key: 'row_total', label: 'Units', kind: 'derived', dp: 0, width: '58px',
       total: true, blankZero: true,
       title: 'Units on this floor. Computed, not typed.' },
+    { key: '_del', label: '', kind: 'delete', width: '34px' },
   ];
 
   main.innerHTML = `
     <div class="screen-head">
       <h1>Room Config</h1>
       <p>Which unit types sit on which floors. Type a count, paste a column straight from Excel,
-         or use the arrow keys. Every total on this page and in the bar above is computed from
-         these cells.</p>
+         or use the arrow keys. Add floors and unit types here — every total on this page and in
+         the bar above follows from these cells.</p>
+    </div>
+    <div class="toolbar">
+      <button class="btn primary" id="addUnitType">+ Add unit type</button>
+      <span class="muted">${shown.length} types · ${data.floors.length} floors</span>
     </div>
     <div class="card">
       <h2>Floor × unit type
-        <span class="sub">${data.floors.length} floors · ${shown.length} types ·
-        white cells are yours, grey are computed</span></h2>
+        <span class="sub">white cells are yours, grey are computed</span></h2>
       <div id="grid"></div>
     </div>
     <div class="card">
@@ -51,20 +61,37 @@ route('/room-config', async (main) => {
     columns,
     rows: data.floors,
     reload: refresh,
+    addLabel: 'Add floor',
+    rowName: row => `floor “${row.name}”`,
+    onAdd: () => api.post('/collections/floors', {
+      name: `Floor ${data.floors.length + 1}`, floor_to_floor_ht: 3.0,
+    }),
+    onDelete: row => api.send('DELETE', `/collections/floors/${row.id}`),
     footer: rows => [
-      '<strong>Total</strong>', '',
+      '<strong>Total</strong>', '', '',
       ...shown.map(u => `<span class="mono">${u.total}</span>`),
-      `<span class="mono">${rows.reduce((a, r) => a + r.row_total, 0)}</span>`,
+      `<span class="mono">${rows.reduce((a, r) => a + r.row_total, 0)}</span>`, '',
     ],
     onCommit: async (row, col, value) => {
-      if (col.key === 'floor_to_floor_ht') {
-        await api.put(`/floors/${row.id}`, { floor_to_floor_ht: value });
+      if (['name', 'floor_to_floor_ht', 'floor_type'].includes(col.key)) {
+        await api.send('PATCH', `/collections/floors/${row.id}`, { [col.key]: value });
       } else {
         await api.put('/room-config/cell',
           { floor_id: row.id, unit_type_id: col.key, count: value });
       }
     },
   });
+
+  document.getElementById('addUnitType').onclick = async () => {
+    const code = prompt('New unit type code, e.g. "Flat 11" or "Shop 1"');
+    if (!code) return;
+    const classification = prompt(
+      'Classification (1BHK, 2BHK, 3BHK, Office, Shop…)', '2BHK') || 'Unassigned';
+    try {
+      await api.post('/collections/unit-types', { code, classification });
+      await refresh();
+    } catch (err) { alert(err.message); }
+  };
 
   const total = Object.entries(data.classification)
     .reduce((a, [k, v]) => k === 'Office' ? a : a + v, 0);
@@ -73,7 +100,8 @@ route('/room-config', async (main) => {
       ${Object.entries(data.classification).map(([k, v]) => `
         <div class="tile"><div class="k">${escapeHtml(k)}</div>
           <div class="v">${fmt.int(v)}</div>
-          <div class="s">${k === 'Office' ? 'offices' : `${(v / total * 100).toFixed(0)}% of flats`}</div>
+          <div class="s">${k === 'Office' ? 'offices'
+            : `${total ? (v / total * 100).toFixed(0) : 0}% of flats`}</div>
         </div>`).join('')}
     </div>`;
 });

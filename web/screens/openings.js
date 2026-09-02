@@ -9,7 +9,7 @@ import { createGrid } from '../grid.js';
 import { escapeHtml } from '../panel.js';
 
 route('/openings', async (main) => {
-  const data = await api.get('/openings');
+  const [data, ref] = await Promise.all([api.get('/openings'), api.get('/reference')]);
 
   main.innerHTML = `
     <div class="screen-head">
@@ -40,18 +40,26 @@ route('/openings', async (main) => {
 
   createGrid(document.getElementById('types'), {
     columns: [
-      { key: 'code', label: 'Code', kind: 'label', width: '130px' },
-      { key: 'kind', label: 'Kind', kind: 'derived', width: '104px', align: 'left',
-        render: v => `<span class="tag">${escapeHtml(v.replace('_', ' '))}</span>` },
+      { key: 'code', label: 'Code', kind: 'input', text: true, width: '130px',
+        align: 'left' },
+      { key: 'kind', label: 'Kind', kind: 'select', width: '124px',
+        options: ref.opening_kinds },
       { key: 'width_m', label: 'Width', unit: 'm', kind: 'input', dp: 2, width: '80px' },
       { key: 'height_m', label: 'Height', unit: 'm', kind: 'input', dp: 2, width: '80px' },
       { key: 'area_sqm', label: 'Area', unit: 'sq.m', kind: 'derived', dp: 4, width: '96px' },
-      { key: 'specification', label: 'Source', kind: 'derived', width: '260px', align: 'left',
-        render: v => `<span class="muted">${escapeHtml(v || '')}</span>` },
+      { key: 'specification', label: 'Notes', kind: 'input', text: true,
+        width: '260px', align: 'left' },
+      { key: '_del', label: '', kind: 'delete', width: '34px' },
     ],
     rows: data.types,
     reload: refresh,
-    onCommit: (row, col, value) => api.put(`/opening-types/${row.id}`, { [col.key]: value }),
+    addLabel: 'Add opening type',
+    rowName: row => `opening type “${row.code}”`,
+    onAdd: () => api.post('/collections/opening-types',
+      { code: 'NEW', kind: 'door', width_m: 0.9, height_m: 2.1 }),
+    onDelete: row => api.send('DELETE', `/collections/opening-types/${row.id}`),
+    onCommit: (row, col, value) =>
+      api.send('PATCH', `/collections/opening-types/${row.id}`, { [col.key]: value }),
   });
 
   const scheduleColumns = [

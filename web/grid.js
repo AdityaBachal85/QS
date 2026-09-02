@@ -37,6 +37,19 @@ export function createGrid(host, config) {
   if (!rows.length) {
     wrap.innerHTML = `<div class="card-body muted">${escapeHtml(emptyMessage)}</div>`;
     host.appendChild(wrap);
+    if (config.onAdd) {
+      const bar = document.createElement('div');
+      bar.className = 'grid-actions';
+      bar.innerHTML = `<button class="btn" id="addRowEmpty">+ ${
+        escapeHtml(config.addLabel || 'Add row')}</button>`;
+      bar.querySelector('#addRowEmpty').onclick = async () => {
+        try {
+          await config.onAdd();
+          if (config.reload) await config.reload();
+        } catch (err) { toast(err.message, true); }
+      };
+      host.appendChild(bar);
+    }
     return { element: wrap };
   }
 
@@ -44,7 +57,8 @@ export function createGrid(host, config) {
   table.className = 'grid';
   table.innerHTML = `
     <thead><tr>${columns.map((c, ci) => `
-      <th class="${c.kind === 'label' || c.align === 'left' ? 'left' : ''} ${c.total ? 'total' : ''}"
+      <th class="${c.kind === 'label' || c.kind === 'select' || c.align === 'left'
+                    ? 'left' : ''} ${c.total ? 'total' : ''}"
           ${c.width ? `style="min-width:${c.width}"` : ''}
           ${stickyFirst && ci === 0 ? 'style="position:sticky;left:0;z-index:4"' : ''}
           title="${escapeHtml(c.title || '')}">${escapeHtml(c.label)}${
@@ -61,7 +75,18 @@ export function createGrid(host, config) {
 
   function display(row, col) {
     const v = valueOf(row, col);
+    if (col.kind === 'delete') {
+      return `<button class="row-del" title="Delete this row" tabindex="-1">&times;</button>`;
+    }
     if (col.render) return col.render(v, row);
+    if (col.kind === 'select') {
+      // Show the label, not the id. A dropdown is how a typo stops being
+      // possible -- the workbook's joins broke on 'Vitrfied Skirting',
+      // 'Skriting', 'Arcylic' and 'Membrame' (C-34).
+      const opt = (col.options || []).find(o => String(o.value) === String(v));
+      return opt ? escapeHtml(opt.label)
+                 : `<span class="muted">${escapeHtml(v ?? '—')}</span>`;
+    }
     if (col.kind === 'label') return escapeHtml(v ?? '');
     // A matrix of counts reads far better with blanks than with a wall of
     // zeros -- the same reason the workbook leaves those cells empty.
@@ -78,7 +103,9 @@ export function createGrid(host, config) {
     const classes = [];
     if (col.kind === 'label') classes.push('label', 'left');
     else if (col.kind === 'derived') classes.push('derived');
+    else if (col.kind === 'delete') classes.push('act');
     else classes.push('cell');
+    if (col.kind === 'select') classes.push('sel-cell', 'left');
     if (col.total) classes.push('total');
     if (col.align === 'left') classes.push('left');
     const v = valueOf(row, col);
@@ -97,7 +124,7 @@ export function createGrid(host, config) {
       <tr data-r="${ri}">${columns.map((col, ci) => `
         <td class="${cellClass(row, col)}"
             data-r="${ri}" data-c="${ci}"
-            tabindex="${col.kind === 'label' ? -1 : 0}"
+            tabindex="${col.kind === 'label' || col.kind === 'delete' ? -1 : 0}"
             ${stickyFirst && ci === 0
               ? 'style="position:sticky;left:0;z-index:2;background:var(--surface)"' : ''}
             >${display(row, col)}</td>`).join('')}</tr>`).join('');
@@ -145,6 +172,7 @@ export function createGrid(host, config) {
 
   function beginEdit(td, seed) {
     const col = columns[td.dataset.c];
+    if (col.kind === 'select') return beginSelect(td, col);
     if (col.kind !== 'input') return;
     const row = rows[td.dataset.r];
     const current = valueOf(row, col);
@@ -165,6 +193,42 @@ export function createGrid(host, config) {
       else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
     });
     input.addEventListener('blur', () => { if (editing) commit(input.value, 0, 0); });
+  }
+
+  function beginSelect(td, col) {
+    const row = rows[td.dataset.r];
+    const current = valueOf(row, col);
+    const original = td.innerHTML;
+    editing = { td, col, row, original };
+    td.classList.add('editing');
+    td.innerHTML = `<select>${(col.options || []).map(o =>
+      `<option value="${escapeHtml(o.value)}" ${
+        String(o.value) === String(current) ? 'selected' : ''
+      }>${escapeHtml(o.label)}</option>`).join('')}</select>`;
+
+    const select = td.querySelector('select');
+    select.focus();
+    const finish = async (commitIt) => {
+      if (!editing) return;
+      const chosen = select.value;
+      editing = null;
+      td.classList.remove('editing');
+      if (!commitIt || chosen === String(current)) {
+        td.innerHTML = original;
+      } else {
+        undoStack.push({ row, col, value: current });
+        td.innerHTML = display(row, col);
+        await apply(row, col, chosen, td);
+      }
+      td.focus();
+    };
+    select.addEventListener('change', () => finish(true));
+    select.addEventListener('blur', () => finish(true));
+    select.addEventListener('keydown', e => {
+      e.stopPropagation();
+      if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    });
   }
 
   function cancel() {
@@ -213,11 +277,13 @@ export function createGrid(host, config) {
 
   // -- events -------------------------------------------------------------
 
-  tbody.addEventListener('click', e => {
+  tbody.addEventListener('click', async e => {
     const td = e.target.closest('td');
     if (!td || editing) return;
     const col = columns[td.dataset.c];
     const row = rows[td.dataset.r];
+    if (e.target.closest('.row-del')) { await removeRow(row); return; }
+    if (col.kind === 'select') { beginSelect(td, col); return; }
     if (col.kind === 'derived' && onDerivedClick) onDerivedClick(row, col, td);
   });
 
@@ -244,7 +310,7 @@ export function createGrid(host, config) {
       }
       case 'Enter':
         e.preventDefault();
-        if (col.kind === 'input') beginEdit(td);
+        if (col.kind === 'input' || col.kind === 'select') beginEdit(td);
         else if (col.kind === 'derived' && onDerivedClick) onDerivedClick(row, col, td);
         return;
       case 'Delete':
@@ -304,8 +370,47 @@ export function createGrid(host, config) {
     } catch (err) { toast(err.message, true); }
   }
 
+  async function removeRow(row) {
+    if (!config.onDelete) return;
+    const name = config.rowName ? config.rowName(row) : 'this row';
+    // Ask first, and let the caller's endpoint be the one that refuses when
+    // something still points at the record.
+    if (!window.confirm(`Delete ${name}?`)) return;
+    try {
+      const result = await config.onDelete(row);
+      if (config.reload) await config.reload();
+      const removed = result && result.removed
+        ? Object.entries(result.removed).map(([k, n]) => `${n} ${k}`).join(', ')
+        : 'deleted';
+      toast(`Removed: ${removed}`);
+    } catch (err) {
+      toast(err.message, true);
+    }
+  }
+
+  async function addRow() {
+    if (!config.onAdd) return;
+    try {
+      await config.onAdd();
+      if (config.reload) await config.reload();
+      toast(config.addedMessage || 'Row added');
+    } catch (err) {
+      toast(err.message, true);
+    }
+  }
+
   draw();
   wrap.appendChild(table);
   host.appendChild(wrap);
-  return { element: wrap, redraw: draw, undo };
+
+  if (config.onAdd) {
+    const bar = document.createElement('div');
+    bar.className = 'grid-actions';
+    bar.innerHTML = `<button class="btn" id="addRow">+ ${
+      escapeHtml(config.addLabel || 'Add row')}</button>`;
+    bar.querySelector('#addRow').onclick = addRow;
+    host.appendChild(bar);
+  }
+
+  return { element: wrap, redraw: draw, undo, addRow };
 }

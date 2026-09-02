@@ -1,22 +1,25 @@
 // Unit types, their rooms, and the quantities each room produces.
 //
 // This is where "a flat with four bathrooms and a flat with one" is just a
-// different number of rows, and where the deduction rules become visible: every
-// finish shows its gross, what the room's own openings take off it, and the net.
+// different number of rows: add a room and it is a row, delete one and it is
+// gone. The room type is a dropdown, not free text, so the same room cannot be
+// spelled two ways -- which is exactly what happened in the workbook, where
+// `C.Bedroom` and `C. Bedroom` are one room typed twice.
 
 import { api, fmt, refresh, route } from '../app.js';
 import { createGrid } from '../grid.js';
-import { escapeHtml } from '../panel.js';
-import { showDerivation } from '../panel.js';
+import { escapeHtml, showDerivation } from '../panel.js';
 
 route('/unit-types', async (main, hash) => {
   const selected = new URLSearchParams(hash.split('?')[1] || '').get('id');
-  const types = await api.get('/unit-types');
-  if (!selected) return renderList(main, types);
-  return renderRooms(main, types, selected);
+  const [types, ref] = await Promise.all([
+    api.get('/unit-types'), api.get('/reference'),
+  ]);
+  if (!selected) return renderList(main, types, ref);
+  return renderRooms(main, ref, selected);
 });
 
-function renderList(main, types) {
+function renderList(main, types, ref) {
   main.innerHTML = `
     <div class="screen-head">
       <h1>Unit Types &amp; Rooms</h1>
@@ -25,25 +28,35 @@ function renderList(main, types) {
          computed from the square metres you enter; there is no square-foot cell to overwrite.</p>
     </div>
     <div class="card">
-      <h2>All unit types <span class="sub">${types.length} types</span></h2>
+      <h2>All unit types <span class="sub">${types.length} types · click one to edit its rooms</span></h2>
       <div id="grid"></div>
     </div>`;
 
   createGrid(document.getElementById('grid'), {
     columns: [
-      { key: 'code', label: 'Type', kind: 'label', width: '170px',
-        render: (v, r) => `<a href="#/unit-types?id=${encodeURIComponent(r.id)}">${escapeHtml(v)}</a>` },
-      { key: 'classification', label: 'Class', kind: 'derived', width: '90px', align: 'left',
-        render: v => `<span class="tag">${escapeHtml(v)}</span>` },
-      { key: 'rooms', label: 'Rooms', kind: 'derived', dp: 0, width: '64px' },
+      { key: 'code', label: 'Type', kind: 'input', text: true, width: '180px',
+        align: 'left', title: 'Type over it to rename.' },
+      { key: 'classification', label: 'Class', kind: 'input', text: true,
+        width: '100px', align: 'left' },
+      { key: 'rooms', label: 'Rooms', kind: 'derived', dp: 0, width: '64px',
+        render: (v, r) => `<a href="#/unit-types?id=${encodeURIComponent(r.id)}">${v} rooms</a>` },
       { key: 'count', label: 'Units', kind: 'derived', dp: 0, width: '64px',
         title: 'Summed from the floor matrix, not typed.' },
       { key: 'area_sqm', label: 'Carpet', unit: 'sq.m', kind: 'derived', dp: 2, width: '86px' },
       { key: 'area_sqft', label: 'Carpet', unit: 'sq.ft', kind: 'derived', dp: 2, width: '96px' },
       { key: 'total_sqft', label: 'All units', unit: 'sq.ft', kind: 'derived', dp: 2,
         width: '112px', total: true },
+      { key: '_del', label: '', kind: 'delete', width: '34px' },
     ],
     rows: types,
+    reload: refresh,
+    addLabel: 'Add unit type',
+    rowName: row => `“${row.code}” and its ${row.rooms} rooms`,
+    onAdd: () => api.post('/collections/unit-types',
+      { code: `Type ${types.length + 1}`, classification: 'Unassigned' }),
+    onDelete: row => api.send('DELETE', `/collections/unit-types/${row.id}`),
+    onCommit: (row, col, value) =>
+      api.send('PATCH', `/collections/unit-types/${row.id}`, { [col.key]: value }),
     onDerivedClick: (row, col) => {
       if (col.key === 'total_sqft') {
         showDerivation(`${row.code} — total carpet area`, row.total_sqft, row.derivation,
@@ -53,7 +66,7 @@ function renderList(main, types) {
   });
 }
 
-async function renderRooms(main, types, id) {
+async function renderRooms(main, ref, id) {
   const data = await api.get(`/unit-types/${encodeURIComponent(id)}/rooms`);
   const u = data.unit_type;
 
@@ -69,37 +82,48 @@ async function renderRooms(main, types, id) {
       <div id="grid"></div>
     </div>
     <div class="card">
+      <h2>Openings per room <span class="sub">what each room's deductions are folded from</span></h2>
+      <div id="openings"></div>
+    </div>
+    <div class="card">
       <h2>Quantities per room
         <span class="sub">gross, what the room's own openings deduct, and the net</span></h2>
       <div class="card-body" style="padding-top:6px">
         <p class="muted" style="margin-top:0">Skirting deducts each door's <strong>width</strong>,
         not its area — a running-metre quantity takes a running-metre deduction. Wall finishes
-        deduct the full opening area. Add a door to a room and both move by themselves.</p>
+        deduct the full opening area. Add a door below and both move by themselves.</p>
       </div>
       <div id="qty"></div>
     </div>`;
 
   createGrid(document.getElementById('grid'), {
     columns: [
-      { key: 'label', label: 'Room', kind: 'label', width: '190px' },
+      { key: 'label', label: 'Room', kind: 'input', text: true, width: '180px',
+        align: 'left' },
+      { key: 'room_type_id', label: 'Room type', kind: 'select', width: '170px',
+        options: ref.room_types,
+        title: 'Chosen from the room-type master — never typed, so the same room '
+             + 'cannot be spelled two ways.' },
       { key: 'category', label: 'Category', kind: 'derived', width: '92px', align: 'left',
         render: v => `<span class="tag">${escapeHtml(v)}</span>` },
       { key: 'count_per_unit', label: 'Nos', kind: 'input', dp: 0, width: '54px' },
       { key: 'carpet_area_sqm', label: 'Area', unit: 'sq.m', kind: 'input', dp: 2, width: '84px' },
       { key: 'perimeter_m', label: 'Perimeter', unit: 'm', kind: 'input', dp: 2, width: '90px' },
-      { key: 'clear_height_m', label: 'Clear ht', unit: 'm', kind: 'input', dp: 2, width: '82px',
-        nullable: true, title: 'Blank uses the project default.' },
+      { key: 'clear_height_m', label: 'Clear ht', unit: 'm', kind: 'input', dp: 2,
+        width: '82px', nullable: true, title: 'Blank uses the project default.' },
       { key: 'area_sqft', label: 'Area', unit: 'sq.ft', kind: 'derived', dp: 4, width: '100px',
         title: 'Derived. There is no field, no column and no endpoint to overwrite this.' },
       { key: 'total_sqft', label: 'Total', unit: 'sq.ft', kind: 'derived', dp: 4, width: '104px' },
-      { key: 'openings', label: 'Openings', kind: 'derived', width: '150px', align: 'left',
-        render: list => list.length
-          ? list.map(o => `<span class="tag">${escapeHtml(o.code)}${o.count > 1 ? `×${o.count}` : ''}</span>`).join(' ')
-          : '<span class="muted">none</span>' },
+      { key: '_del', label: '', kind: 'delete', width: '34px' },
     ],
     rows: data.rooms,
     reload: refresh,
-    onCommit: (row, col, value) => api.put(`/rooms/${row.id}`, { [col.key]: value }),
+    addLabel: 'Add room',
+    rowName: row => `room “${row.label}”`,
+    onAdd: () => api.post('/collections/rooms', { unit_type_id: id }),
+    onDelete: row => api.send('DELETE', `/collections/rooms/${row.id}`),
+    onCommit: (row, col, value) =>
+      api.send('PATCH', `/collections/rooms/${row.id}`, { [col.key]: value }),
     onDerivedClick: (row, col) => {
       if (col.key === 'area_sqft') {
         showDerivation(`${row.label} — area`, row.area_sqft, row.derivation, { unit: 'sq.ft' });
@@ -107,7 +131,38 @@ async function renderRooms(main, types, id) {
     },
   });
 
-  // -- quantities, one block per room ------------------------------------
+  // -- openings, flattened one row per (room, opening) --------------------
+  const openingRows = data.rooms.flatMap(room =>
+    room.openings.map(o => ({ ...o, room_label: room.label, room_id: room.id })));
+
+  createGrid(document.getElementById('openings'), {
+    columns: [
+      { key: 'room_label', label: 'Room', kind: 'label', width: '180px' },
+      { key: 'opening_type_id', label: 'Opening', kind: 'select', width: '190px',
+        options: ref.opening_types },
+      { key: 'count', label: 'Nos', kind: 'input', dp: 0, width: '60px' },
+      { key: 'width_m', label: 'Width', unit: 'm', kind: 'derived', dp: 2, width: '76px' },
+      { key: 'height_m', label: 'Height', unit: 'm', kind: 'derived', dp: 2, width: '76px' },
+      { key: '_del', label: '', kind: 'delete', width: '34px' },
+    ],
+    rows: openingRows,
+    reload: refresh,
+    emptyMessage: 'No openings in this unit type yet.',
+    addLabel: 'Add opening',
+    rowName: row => `${row.code} in ${row.room_label}`,
+    onAdd: async () => {
+      if (!data.rooms.length) throw new Error('add a room first');
+      await api.post('/collections/room-openings', {
+        unit_type_room_id: data.rooms[0].id,
+        opening_type_id: ref.opening_types[0].value, count: 1,
+      });
+    },
+    onDelete: row => api.send('DELETE', `/collections/room-openings/${row.id}`),
+    onCommit: (row, col, value) =>
+      api.send('PATCH', `/collections/room-openings/${row.id}`, { [col.key]: value }),
+  });
+
+  // -- quantities ---------------------------------------------------------
   const NAMES = {
     floor_area: 'Flooring', skirting: 'Skirting', wall_finish: 'Wall plaster / paint',
     dado: 'Dado', ceiling_area: 'Ceiling', door_frame: 'Door frames',
