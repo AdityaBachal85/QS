@@ -12,6 +12,7 @@ import pytest
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT / "packages" / "engine"))
 sys.path.insert(0, str(ROOT / "packages" / "importer"))
+sys.path.insert(0, str(ROOT / "packages" / "app"))
 
 WORKBOOK = ROOT / "data" / "workbooks" / "20240131 - AVS Budget R0 - Discussion.xlsx"
 

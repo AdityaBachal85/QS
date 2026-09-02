@@ -39,6 +39,17 @@ source workbook, and there is a test asserting it.
    in `params.py` with a description. A parameter without a description is
    reported as `PARAMETER_UNNAMED`.
 
+8. **The UI computes nothing.** Every figure on screen comes from an API call
+   that came from the engine. If a number is being worked out in JavaScript,
+   it is in the wrong place.
+
+9. **All SQL lives in `packages/app/qs_app/store.py`.** Nothing else in the
+   codebase knows a database exists.
+
+## Running it
+
+`make run` — one process, `qs.db`, http://localhost:8000. No Docker, no npm.
+
 ## Before changing a calculation
 
 Run `make recon`. If a line moves from PASS, you have changed a number the

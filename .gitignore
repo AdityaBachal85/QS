@@ -5,3 +5,8 @@ __pycache__/
 .DS_Store
 node_modules/
 dist/
+
+# Local database — created by `make seed`, never shared
+qs.db
+qs.db-wal
+qs.db-shm

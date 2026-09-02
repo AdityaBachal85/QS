@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DBOT QS Platform</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#128208;</text></svg>">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="brand">
+      <span class="mark">QS</span>
+      <div>
+        <div class="project-name" id="projectName">Loading…</div>
+        <div class="project-sub" id="projectSub"></div>
+      </div>
+    </div>
+    <div class="headline" id="headline"></div>
+    <div class="health" id="healthChip"></div>
+  </header>
+
+  <nav id="sidebar">
+    <a href="#/overview"       data-nav>Overview</a>
+    <div class="nav-group">Inputs</div>
+    <a href="#/room-config"    data-nav>Room Config</a>
+    <a href="#/unit-types"     data-nav>Unit Types &amp; Rooms</a>
+    <a href="#/openings"       data-nav>Doors &amp; Windows</a>
+    <a href="#/rates"          data-nav>Rate Library</a>
+    <a href="#/parameters"     data-nav>Parameters</a>
+    <div class="nav-group">Checks</div>
+    <a href="#/validation"     data-nav>Validation</a>
+    <a href="#/reconciliation" data-nav>Reconciliation</a>
+    <a href="#/audit"          data-nav>Change log</a>
+    <div class="legend">
+      <div><span class="swatch input"></span> you enter this</div>
+      <div><span class="swatch derived"></span> the system computes it</div>
+      <div class="legend-note">Click any grey figure to see how it was derived.</div>
+    </div>
+  </nav>
+
+  <main id="main"><div class="loading">Loading…</div></main>
+
+  <aside id="panel" hidden>
+    <div class="panel-head">
+      <strong id="panelTitle">Derivation</strong>
+      <button id="panelClose" aria-label="Close">&times;</button>
+    </div>
+    <div id="panelBody"></div>
+  </aside>
+</div>
+<div id="toast" hidden></div>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
