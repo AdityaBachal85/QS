@@ -158,8 +158,25 @@ const SCREENS = [
   'audit',
 ];
 
+// Which build is on screen.
+//
+// The UI is served with `Cache-Control: no-store` so a reload always fetches
+// current code -- before that, a browser could reuse an old `app.js` for hours
+// and a pulled change simply would not appear. This stamp makes that visible
+// rather than something to be trusted.
+async function showBuild() {
+  try {
+    const v = await api.get('/version');
+    const el = document.getElementById('buildStamp');
+    if (!el || !v.commit || v.commit === 'unknown') return;
+    el.innerHTML = `<span class="chip mute" title="${v.branch || ''} · ${
+      v.committed_at || ''}">build ${v.commit}</span>`;
+  } catch { /* a missing stamp must never stop the app */ }
+}
+
 (async function boot() {
   await Promise.all(SCREENS.map(name => import(`./screens/${name}.js`)));
+  showBuild();
   try {
     setHeadline(await api.get('/headline'));
   } catch (err) {

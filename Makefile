@@ -9,7 +9,7 @@ help:
 	@echo "make setup   create the venv and install dependencies"
 	@echo "make test    run the engine and importer test suites"
 	@echo "make recon   import the AVS workbook and print Excel vs Platform"
-	@echo "make seed    create qs.db and import the workbook into it"
+	@echo "make seed    import the workbook into qs.db (KEEP=1 to keep what is there)"
 	@echo "make run     start the platform on http://localhost:8000"
 	@echo "make clean   remove the venv and caches"
 
@@ -24,8 +24,11 @@ test:
 recon:
 	$(PY) -m qs_importer $(WORKBOOK)
 
+# Re-imports the workbook every run, so what you see is always this build's
+# data. The previous database is copied to qs.db.bak first. KEEP=1 to hold on
+# to what is already there.
 seed:
-	$(PY) -m qs_app.seed $(ARGS)
+	$(PY) -m qs_app.seed $(if $(KEEP),--keep,) $(ARGS)
 
 # One process. It serves the UI and the API and stores everything in qs.db --
 # no database server, no build step, nothing else to start.

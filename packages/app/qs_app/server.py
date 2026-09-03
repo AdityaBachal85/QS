@@ -38,6 +38,31 @@ DB_PATH = Path(os.environ.get("QS_DB", ROOT / "qs.db"))
 WORKBOOK = ROOT / "data" / "workbooks" / "20240131 - AVS Budget R0 - Discussion.xlsx"
 
 
+def build_stamp() -> dict[str, Any]:
+    """The running commit, read from git once and remembered.
+
+    Falls back to "unknown" outside a checkout rather than failing -- a missing
+    stamp must never stop the app starting.
+    """
+    if getattr(build_stamp, "_cached", None) is None:
+        import subprocess
+        stamp = {"commit": "unknown", "committed_at": "", "branch": ""}
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(ROOT), "log", "-1", "--format=%h%n%cs%n%D"],
+                capture_output=True, text=True, timeout=5, check=True).stdout
+            commit, date, refs = (out.splitlines() + ["", "", ""])[:3]
+            branch = ""
+            for ref in refs.split(", "):
+                if ref.startswith("HEAD -> "):
+                    branch = ref[len("HEAD -> "):]
+            stamp = {"commit": commit, "committed_at": date, "branch": branch}
+        except Exception:
+            pass
+        build_stamp._cached = stamp
+    return dict(build_stamp._cached)
+
+
 class State:
     """The open project, held in memory and written through on every change.
 
@@ -525,16 +550,53 @@ def health() -> dict[str, Any]:
     return {"ok": True, "project": state.project_id, "db": str(state.store.path)}
 
 
+@app.get("/api/version")
+def version() -> dict[str, Any]:
+    """Which build is actually running.
+
+    Without this, "did my pull take effect?" can only be answered by reading
+    source. The UI puts the commit in the header so it is one glance.
+    """
+    return build_stamp()
+
+
+#: Served on every UI response.
+#:
+#: Starlette sends ``etag`` and ``last-modified`` but never ``Cache-Control``,
+#: and the module URLs carry no version. With no ``Cache-Control`` a browser
+#: falls back to heuristic freshness -- roughly a tenth of the file's age -- and
+#: reuses ``app.js`` for hours without asking. Pull a new build and the screen
+#: does not change: a route added to the new ``app.js`` is never registered, so
+#: the router falls through and the page comes up empty.
+#:
+#: This is one process a QS runs on their own machine. There is nothing to gain
+#: from caching it and a whole class of "I pulled and nothing happened" to lose.
+NO_STORE = "no-store, no-cache, must-revalidate, max-age=0"
+
+
+class NoStoreStatic(StaticFiles):
+    """Static files that a reload always re-fetches."""
+
+    def file_response(self, *args: Any, **kwargs: Any):  # noqa: ANN201
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = NO_STORE
+        return response
+
+
+def _page(path: Path) -> FileResponse:
+    return FileResponse(path, headers={"Cache-Control": NO_STORE})
+
+
 if WEB.exists():
-    app.mount("/static", StaticFiles(directory=WEB), name="static")
+    app.mount("/static", NoStoreStatic(directory=WEB), name="static")
 
     @app.get("/")
     def index() -> FileResponse:
-        return FileResponse(WEB / "index.html")
+        return _page(WEB / "index.html")
 
 
 @app.exception_handler(404)
 def not_found(request, exc):  # noqa: ANN001
     if request.url.path.startswith("/api"):
         return JSONResponse({"error": str(exc.detail)}, status_code=404)
-    return FileResponse(WEB / "index.html")
+    return _page(WEB / "index.html")

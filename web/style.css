@@ -304,3 +304,5 @@ td.editing select {
 
 /* An in-table warning: red text, not the app's 30px logo badge. */
 .warn-text { color: var(--bad); font-weight: 600; }
+
+.build { display: flex; align-items: center; margin-left: 8px; }

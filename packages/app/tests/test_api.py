@@ -166,3 +166,89 @@ def test_the_wall_derivation_names_where_its_height_came_from(client):
     assert "floor_to_floor_ht" in names
     assert names["floor_to_floor_ht"]["source"] in {"floor", "room", "parameter"}
     assert "slab_allowance_m" in names
+
+
+# --------------------------------------------------------------------------
+# Serving -- a pull has to reach the screen
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("path", [
+    "/", "/static/app.js", "/static/style.css",
+    "/static/screens/finish-totals.js", "/static/screens/openings.js",
+])
+def test_the_ui_is_never_cached(client, path):
+    """The regression that made a pulled build invisible.
+
+    Starlette sends `etag` and `last-modified` but no `Cache-Control`, and the
+    module URLs carry no version, so a browser applies heuristic freshness and
+    reuses `app.js` for hours. A route added to the new `app.js` is then never
+    registered and its screen comes up empty.
+    """
+    response = client.get(path)
+    assert response.status_code == 200
+    assert "no-store" in response.headers.get("cache-control", "")
+
+
+def test_the_running_build_is_reported(client):
+    """"Did my pull take effect?" should be one glance, not a source read."""
+    version = client.get("/api/version").json()
+    assert set(version) >= {"commit", "committed_at", "branch"}
+    if version["commit"] != "unknown":
+        assert 6 <= len(version["commit"]) <= 12
+
+
+# --------------------------------------------------------------------------
+# Seeding -- the data has to be this build's too
+# --------------------------------------------------------------------------
+
+def test_seeding_over_an_existing_database_reimports_and_backs_it_up(tmp_path, avs):
+    """Door and window rates are attached at import time.
+
+    A database written by an older build has opening types with no rate at all,
+    so every opening prices at nothing and the schedule totals zero -- which
+    reads as a broken screen rather than as stale data.
+    """
+    from qs_app.seed import seed
+    from qs_app.store import Store
+
+    db = tmp_path / "qs.db"
+    seed(db, avs.workbook.path)
+    first = Store(db).load("avs")
+
+    # Strip the rates the way a pre-B3.5 database would have them.
+    stripped = Store(db).load("avs")
+    for opening in stripped.opening_types:
+        opening.rate_item_id = None
+    Store(db).save(stripped)
+    assert not any(o.rate_item_id for o in Store(db).load("avs").opening_types)
+
+    seed(db, avs.workbook.path)
+
+    after = Store(db).load("avs")
+    assert len(after.opening_types) == len(first.opening_types)
+    assert all(o.rate_item_id for o in after.opening_types), \
+        "a re-import must restore the rates an older build never wrote"
+    assert (tmp_path / "qs.db.bak").exists(), "the previous database is kept"
+
+
+def test_keep_leaves_an_existing_database_alone(tmp_path, avs):
+    from qs_app.seed import seed
+    from qs_app.store import Store
+
+    db = tmp_path / "qs.db"
+    seed(db, avs.workbook.path)
+
+    marked = Store(db).load("avs")
+    marked.project.name = "edited by hand"
+    Store(db).save(marked)
+
+    seed(db, avs.workbook.path, keep=True)
+    assert Store(db).load("avs").project.name == "edited by hand"
+
+
+def test_a_seeded_database_prices_every_opening(client):
+    """The exact state that made Doors & Windows read zero."""
+    costs = client.get("/api/opening-totals").json()
+    assert costs["total"] > 0
+    priced = [l for l in costs["lines"] if l["rate"]]
+    assert len(priced) == len(costs["lines"]), "every type carries a rate"
