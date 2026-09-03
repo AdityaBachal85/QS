@@ -238,6 +238,117 @@ def rates(model: ProjectModel, params: ParameterSet) -> list[dict[str, Any]]:
     return out
 
 
+# --------------------------------------------------------------------------
+# The finishing take-off -- where quantities meet rates
+# --------------------------------------------------------------------------
+
+def _line_json(line) -> dict[str, Any]:
+    return {
+        "unit_type_id": line.unit_type_id, "unit_type": line.unit_type_code,
+        "room_id": line.room_id, "room": line.room_label,
+        "finish": line.finish_name, "finish_slot_id": line.finish_slot_id,
+        "rule": line.qty_rule, "unit": line.unit,
+        "gross": line.gross, "deduction": line.deduction, "net": line.net,
+        "unit_count": line.unit_count, "total_qty": line.total_qty,
+        "rate_item_id": line.rate_item_id, "rate_description": line.rate_description,
+        "rate": line.rate, "amount_per_unit": line.amount_per_unit,
+        "total_amount": line.total_amount,
+        "status": line.status, "message": line.message,
+        "gross_derivation": _derivation(line.gross_derivation)
+        if line.gross_derivation else None,
+        "deduction_derivation": _derivation(line.deduction_derivation)
+        if line.deduction_derivation else None,
+        "rate_derivation": _derivation(line.rate_derivation)
+        if line.rate_derivation else None,
+    }
+
+
+def takeoff(model: ProjectModel, params: ParameterSet,
+            unit_type_id: str | None = None) -> dict[str, Any]:
+    """Every finish in every room, priced.
+
+    Replaces 1,451 hand-written rows in ``Internal Finishes Flats``. The totals
+    are folds over a filter, so a finish added tomorrow is included because it
+    matches, not because a range was widened.
+    """
+    from qs_engine.rules.takeoff import (by_finish, by_unit_type, compute_takeoff,
+                                         total_amount, unpriced)
+
+    lines = compute_takeoff(model, params, unit_type_id)
+    def group_json(groups):
+        return [{"key": g.key, "label": g.label, "unit": g.unit,
+                 "quantity": g.quantity, "amount": g.amount,
+                 "lines": g.lines, "unpriced": g.unpriced,
+                 "blended_rate": g.blended_rate} for g in groups]
+
+    missing = unpriced(lines)
+    return {
+        "lines": [_line_json(l) for l in lines],
+        "by_finish": group_json(by_finish(lines)),
+        "by_unit_type": group_json(by_unit_type(lines)),
+        "total": total_amount(lines),
+        "line_count": len(lines),
+        "priced_count": sum(1 for l in lines if l.is_priced),
+        "unpriced": [_line_json(l) for l in missing],
+        "unpriced_qty": sum(l.total_qty for l in missing),
+    }
+
+
+def room_costs(model: ProjectModel, params: ParameterSet,
+               unit_type_id: str) -> dict[str, list[dict[str, Any]]]:
+    """Take-off lines for one unit type, keyed by room.
+
+    This is what puts a rate beside every quantity on the Unit Types screen.
+    """
+    from qs_engine.rules.takeoff import compute_takeoff
+
+    out: dict[str, list[dict[str, Any]]] = {}
+    for line in compute_takeoff(model, params, unit_type_id):
+        out.setdefault(line.room_id, []).append(_line_json(line))
+    return out
+
+
+def room_type_mapping(model: ProjectModel) -> list[dict[str, Any]]:
+    """Which rate block prices each room type, and whether anyone has agreed.
+
+    The sizes sheets and the rate list name rooms differently -- ``M. Bedroom``
+    against ``M. Bed``, ``M. Toilet`` against ``Toilet With M. Bed``. Only six of
+    twenty-five match by name, so without this every other room is measured and
+    unpriced.
+    """
+    used = {r.room_type_id for r in model.unit_type_rooms}
+    priced = {s.room_type_id for s in model.room_finish_specs}
+    rooms_per_type: dict[str, int] = {}
+    for room in model.unit_type_rooms:
+        rooms_per_type[room.room_type_id] = rooms_per_type.get(room.room_type_id, 0) + 1
+
+    out = []
+    for room_type in sorted(model.room_types, key=lambda t: t.name):
+        if room_type.id not in used:
+            continue
+        target_id = model.pricing_room_type(room_type.id)
+        target = model.room_type(target_id) if target_id else None
+        out.append({
+            "id": room_type.id, "name": room_type.name,
+            "category": room_type.category.value,
+            "rooms": rooms_per_type.get(room_type.id, 0),
+            "prices_as_id": room_type.prices_as_id,
+            "prices_as": target.name if target else "",
+            "confirmed": room_type.mapping_confirmed,
+            "own_schedule": room_type.id in priced,
+            "finishes": len(model.finish_spec_for(room_type.id)),
+        })
+    return out
+
+
+def priceable_room_types(model: ProjectModel) -> list[dict[str, str]]:
+    """The room types that carry a finish schedule -- the dropdown for mapping."""
+    priced = {s.room_type_id for s in model.room_finish_specs}
+    return [{"value": t.id, "label": t.name}
+            for t in sorted(model.room_types, key=lambda t: t.name)
+            if t.id in priced]
+
+
 def validation(model: ProjectModel, params: ParameterSet) -> dict[str, Any]:
     report = validate(model, params)
     return {

@@ -86,12 +86,14 @@ async function renderRooms(main, ref, id) {
       <div id="openings"></div>
     </div>
     <div class="card">
-      <h2>Quantities per room
-        <span class="sub">gross, what the room's own openings deduct, and the net</span></h2>
+      <h2>Finishes, quantities and cost
+        <span class="sub">${fmt.money(data.amount || 0)} for all ${u.count} units</span></h2>
       <div class="card-body" style="padding-top:6px">
         <p class="muted" style="margin-top:0">Skirting deducts each door's <strong>width</strong>,
         not its area — a running-metre quantity takes a running-metre deduction. Wall finishes
-        deduct the full opening area. Add a door below and both move by themselves.</p>
+        deduct the full opening area. Add a door above and every figure here moves by itself.
+        Rates come from the <a href="#/rates">Rate Library</a> via
+        <a href="#/mapping">room type pricing</a>.</p>
       </div>
       <div id="qty"></div>
     </div>`;
@@ -162,41 +164,69 @@ async function renderRooms(main, ref, id) {
       api.send('PATCH', `/collections/room-openings/${row.id}`, { [col.key]: value }),
   });
 
-  // -- quantities ---------------------------------------------------------
-  const NAMES = {
-    floor_area: 'Flooring', skirting: 'Skirting', wall_finish: 'Wall plaster / paint',
-    dado: 'Dado', ceiling_area: 'Ceiling', door_frame: 'Door frames',
-    window_frame: 'Window frames',
-  };
+  // -- quantities and what they cost --------------------------------------
+  //
+  // This is the answer to "it should also give the rate". Each finish shows the
+  // gross, what this room's own openings deduct, the net, the rate it resolves
+  // to from the library, and the amount -- for one unit and for all of them.
   const DEDUCTS = {
     door_width: 'door widths', door_and_window_area: 'door + window areas',
     openings_within_dado: 'openings below the dado line', none: '—',
   };
+  const byRoomRule = {};
+  for (const room of data.rooms) {
+    for (const c of (room.costs || [])) byRoomRule[`${room.id}|${c.rule}`] = c;
+  }
 
   document.getElementById('qty').innerHTML = `
     <div class="grid-wrap"><table class="grid">
       <thead><tr>
-        <th class="left" style="min-width:180px">Room</th>
+        <th class="left" style="min-width:170px">Room</th>
         <th class="left" style="min-width:150px">Finish</th>
-        <th style="min-width:52px">Unit</th>
-        <th style="min-width:92px">Gross</th>
-        <th style="min-width:92px">Deducts</th>
-        <th class="left" style="min-width:170px">What is deducted</th>
-        <th class="total" style="min-width:96px">Net</th>
+        <th style="min-width:80px">Gross</th>
+        <th style="min-width:80px">Deducts</th>
+        <th class="left" style="min-width:150px">What is deducted</th>
+        <th style="min-width:88px">Net</th>
+        <th style="min-width:48px">Unit</th>
+        <th style="min-width:96px">Rate</th>
+        <th class="total" style="min-width:112px">Per unit</th>
+        <th class="total" style="min-width:124px">All ${u.count} units</th>
       </tr></thead>
-      <tbody>${data.rooms.flatMap(room =>
-        room.quantities.filter(q => q.gross || q.error).map((q, i) => `
+      <tbody>${data.rooms.flatMap(room => {
+        const rows = (room.costs || []).length
+          ? room.costs.map(c => ({ ...c, _label: c.finish }))
+          : room.quantities.filter(q => q.gross || q.error)
+              .map(q => ({ _label: q.rule, unit: q.unit, gross: q.gross,
+                           deduction: q.deduction, net: q.net, rate: null,
+                           amount_per_unit: 0, total_amount: 0,
+                           status: 'no_rate', deduction_rule: q.deduction_rule,
+                           message: q.error || 'this room type has no finish schedule' }));
+        return rows.map((r, i) => {
+          const ded = byRoomRule[`${room.id}|${r.rule}`];
+          const dedRule = r.deduction_rule
+            || (room.quantities.find(q => q.rule === r.rule) || {}).deduction_rule;
+          return `
           <tr>
             <td class="label left">${i === 0 ? escapeHtml(room.label) : ''}</td>
-            <td class="label left">${escapeHtml(NAMES[q.rule] || q.rule)}</td>
-            <td class="derived">${escapeHtml(q.unit || '')}</td>
-            ${q.error
-              ? `<td class="derived missing" colspan="3">${escapeHtml(q.error)}</td>`
-              : `<td class="derived">${fmt.n(q.gross, 3)}</td>
-                 <td class="derived">${q.deduction ? '−' + fmt.n(q.deduction, 3) : '—'}</td>
-                 <td class="derived left"><span class="muted">${escapeHtml(DEDUCTS[q.deduction_rule] || '—')}</span></td>`}
-            <td class="derived total">${q.net === null ? '—' : fmt.n(q.net, 3)}</td>
-          </tr>`)).join('')}
+            <td class="label left">${escapeHtml(r._label)}</td>
+            <td class="derived">${r.gross === null ? '—' : fmt.n(r.gross, 2)}</td>
+            <td class="derived">${r.deduction ? '−' + fmt.n(r.deduction, 2) : '—'}</td>
+            <td class="derived left"><span class="muted">${escapeHtml(DEDUCTS[dedRule] || '—')}</span></td>
+            <td class="derived">${r.net === null ? '—' : fmt.n(r.net, 2)}</td>
+            <td class="derived left">${escapeHtml(r.unit || '')}</td>
+            <td class="derived ${r.rate === null ? 'missing' : ''}">${
+              r.rate === null ? '<span class="tag bad">no rate</span>' : '₹' + fmt.n(r.rate, 2)}</td>
+            <td class="derived total">${r.status === 'priced' ? fmt.money(r.amount_per_unit) : '—'}</td>
+            <td class="derived total">${r.status === 'priced' ? fmt.money(r.total_amount) : '—'}</td>
+          </tr>`;
+        });
+      }).join('')}
       </tbody>
+      <tfoot><tr class="total-row">
+        <td class="left"><strong>Total</strong></td>
+        <td colspan="7"></td>
+        <td>${fmt.money((data.amount || 0) / (u.count || 1))}</td>
+        <td>${fmt.money(data.amount || 0)}</td>
+      </tr></tfoot>
     </table></div>`;
 }

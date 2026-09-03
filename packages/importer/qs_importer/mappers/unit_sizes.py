@@ -48,6 +48,7 @@ _CATEGORY_PATTERNS: tuple[tuple[str, RoomCategory], ...] = (
     ("bath", RoomCategory.TOILET),
     ("powder", RoomCategory.TOILET),
     ("w.c", RoomCategory.TOILET),
+    ("wc", RoomCategory.TOILET),
     ("kitchen", RoomCategory.KITCHEN),
     ("utility", RoomCategory.UTILITY),
     ("balcony", RoomCategory.BALCONY),

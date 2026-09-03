@@ -170,12 +170,29 @@ class FloorUnitMix:
 
 @dataclass
 class RoomType:
-    """Open master data -- users add room types without a release."""
+    """Open master data -- users add room types without a release.
+
+    ``prices_as_id`` exists because the workbook keeps two vocabularies for the
+    same rooms.  ``Flat Sizes`` says ``M. Bedroom``; ``Rate List - Flats`` calls
+    the block that prices it ``M. Bed``.  ``M. Toilet`` is priced by a block
+    named ``Toilet With M. Bed``, and ``Balcony`` by ``Balcony / Utility``.  Only
+    6 of 25 room types match by name, so without this link 98 of 154 rooms can
+    be measured and not priced.
+
+    The importer *proposes* these links; ``mapping_confirmed`` stays False until
+    a QS agrees, and every unconfirmed link is reported by the validation engine
+    with the proposal named. The money is visible immediately, and so is the
+    fact that a guess is holding it up.
+    """
 
     id: str
     project_id: str
     name: str
     category: RoomCategory = RoomCategory.HABITABLE
+    #: The room type whose finish schedule prices this one. None = its own.
+    prices_as_id: str | None = None
+    #: False while the link above is still the importer's proposal.
+    mapping_confirmed: bool = False
 
 
 @dataclass
@@ -460,11 +477,22 @@ class ProjectModel:
                 totals[ut.classification] = totals.get(ut.classification, 0) + n
         return totals
 
+    def pricing_room_type(self, room_type_id: str) -> str:
+        """Which room type's finish schedule prices this one.
+
+        Follows ``prices_as_id`` one step, then stops -- a chain of links is how
+        the workbook's rate daisy chain (C-32) went wrong, so this deliberately
+        does not recurse.
+        """
+        room_type = self.room_type(room_type_id)
+        return room_type.prices_as_id or room_type_id
+
     def finish_spec_for(self, room_type_id: str) -> list[RoomFinishSpec]:
+        target = self.pricing_room_type(room_type_id)
         by_slot = {s.id: s for s in self.finish_slots}
         specs = [
             s for s in self.room_finish_specs
-            if s.room_type_id == room_type_id and s.is_applicable
+            if s.room_type_id == target and s.is_applicable
         ]
         return sorted(specs, key=lambda s: by_slot[s.finish_slot_id].seq
                       if s.finish_slot_id in by_slot else 0)

@@ -153,8 +153,8 @@ window.addEventListener('hashchange', render);
 // route() at the top level would reach `routes` before it exists. Loading them
 // here makes the ordering explicit instead of accidental.
 const SCREENS = [
-  'overview', 'room-config', 'unit-types', 'openings', 'rates',
-  'parameters', 'validation', 'reconciliation', 'audit',
+  'overview', 'room-config', 'unit-types', 'openings', 'rates', 'mapping',
+  'takeoff', 'parameters', 'validation', 'reconciliation', 'audit',
 ];
 
 (async function boot() {

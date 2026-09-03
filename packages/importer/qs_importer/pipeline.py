@@ -17,6 +17,7 @@ from .ids import IdFactory
 from .mappers.openings import map_openings
 from .mappers.rates import SHEET_FLATS, SHEET_OFFICE, map_rate_list
 from .mappers.room_conf import map_room_conf, new_model
+from .mappers.room_mapping import apply_proposals, propose_mappings
 from .mappers.unit_sizes import map_common_areas, map_unit_sizes
 from .reader import Workbook
 
@@ -52,4 +53,7 @@ def import_workbook(path: str | Path, *, params: ParameterSet | None = None) -> 
     warnings = list(map_openings(wb, model, ids))
     warnings += map_rate_list(wb, model, ids, sheet=SHEET_FLATS)
     warnings += map_rate_list(wb, model, ids, sheet=SHEET_OFFICE, last_row=400)
+    # Link the sizes sheets' room names to the rate blocks that price them.
+    # Proposed, never decided: each link stays unconfirmed until a QS agrees.
+    warnings += apply_proposals(model, propose_mappings(model))
     return ImportResult(model, params or ParameterSet.defaults(), wb, warnings)

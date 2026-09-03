@@ -105,9 +105,16 @@ def get_unit_types() -> list[dict[str, Any]]:
 def get_unit_rooms(unit_type_id: str) -> dict[str, Any]:
     model, params = state.require()
     try:
-        return service.unit_rooms(model, params, unit_type_id)
+        data = service.unit_rooms(model, params, unit_type_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    # Rates beside every quantity -- the thing the take-off makes possible.
+    costs = service.room_costs(model, params, unit_type_id)
+    for room in data["rooms"]:
+        room["costs"] = costs.get(room["id"], [])
+        room["amount"] = sum(c["total_amount"] for c in room["costs"])
+    data["amount"] = sum(r["amount"] for r in data["rooms"])
+    return data
 
 
 @app.get("/api/openings")
@@ -128,6 +135,48 @@ def get_parameters() -> list[dict[str, Any]]:
     return [{"key": p.key, "value": p.value, "unit": p.unit,
              "description": p.description, "source": p.source,
              "is_named": p.is_named} for p in params]
+
+
+@app.get("/api/takeoff")
+def get_takeoff(unit_type_id: str | None = None) -> dict[str, Any]:
+    model, params = state.require()
+    return service.takeoff(model, params, unit_type_id)
+
+
+@app.get("/api/room-type-mapping")
+def get_room_type_mapping() -> dict[str, Any]:
+    model, _ = state.require()
+    return {"mappings": service.room_type_mapping(model),
+            "targets": service.priceable_room_types(model)}
+
+
+@app.put("/api/room-type-mapping/{room_type_id}")
+def set_room_type_mapping(room_type_id: str,
+                          payload: dict = Body(...)) -> dict[str, Any]:
+    """Point a room type at the rate block that prices it, or confirm the guess.
+
+    Nothing here is applied silently: the importer proposed these links and each
+    stays flagged until this endpoint records that somebody agreed.
+    """
+    model, _ = state.require()
+    try:
+        room_type = model.room_type(room_type_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+    if "prices_as_id" in payload:
+        target = payload["prices_as_id"] or None
+        if target == room_type_id:
+            target = None
+        old = room_type.prices_as_id
+        room_type.prices_as_id = target
+        state.store.log(model.project.id, "room_type", room_type_id,
+                        "prices_as_id", old, target)
+    if "confirmed" in payload:
+        room_type.mapping_confirmed = bool(payload["confirmed"])
+        state.store.log(model.project.id, "room_type", room_type_id,
+                        "mapping_confirmed", None, room_type.mapping_confirmed)
+    return _touched()
 
 
 @app.get("/api/reference")
