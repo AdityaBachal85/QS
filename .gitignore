@@ -6,7 +6,9 @@ __pycache__/
 node_modules/
 dist/
 
-# Local database — created by `make seed`, never shared
+# Local database — created by `make seed`, never shared.
+# The .bak is the copy `make run` takes before it re-imports.
 qs.db
 qs.db-wal
 qs.db-shm
+qs.db.bak
