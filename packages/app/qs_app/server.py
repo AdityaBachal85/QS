@@ -217,6 +217,16 @@ def get_takeoff_derivation(room_id: str, finish_slot_id: str,
     return found
 
 
+@app.get("/api/usage/{kind}/{subject:path}")
+def get_usage(kind: str, subject: str) -> dict[str, Any]:
+    """Everything that depends on one parameter, rate or room."""
+    model, params = state.require()
+    try:
+        return service.usage(model, params, kind, subject)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @app.get("/api/room-type-mapping")
 def get_room_type_mapping() -> dict[str, Any]:
     model, params = state.require()

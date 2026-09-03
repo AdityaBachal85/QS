@@ -6,7 +6,7 @@
 // spelled two ways -- which is exactly what happened in the workbook, where
 // `C.Bedroom` and `C. Bedroom` are one room typed twice.
 
-import { api, fmt, refresh, route } from '../app.js';
+import { api, fmt, openPanel, refresh, route } from '../app.js';
 import { createGrid } from '../grid.js';
 import { escapeHtml, showDerivation } from '../panel.js';
 
@@ -113,10 +113,33 @@ async function renderRooms(main, ref, id) {
       { key: 'carpet_area_sqm', label: 'Area', unit: 'sq.m', kind: 'input', dp: 2, width: '84px' },
       { key: 'perimeter_m', label: 'Perimeter', unit: 'm', kind: 'input', dp: 2, width: '90px' },
       { key: 'clear_height_m', label: 'Clear ht', unit: 'm', kind: 'input', dp: 2,
-        width: '82px', nullable: true, title: 'Blank uses the project default.' },
+        width: '96px', nullable: true,
+        title: 'Blank inherits this floor\u2019s height from Room Config. Type here '
+             + 'only for a room that is genuinely a different height \u2014 a '
+             + 'double-height gym.',
+        render: (v, row) => (v !== null && v !== undefined
+          ? fmt.n(v, 2)
+          : `<span class="muted" title="inherited from the floor">${
+              fmt.n(data.floor_height_m, 2)}</span>`) },
       { key: 'area_sqft', label: 'Area', unit: 'sq.ft', kind: 'derived', dp: 4, width: '100px',
         title: 'Derived. There is no field, no column and no endpoint to overwrite this.' },
       { key: 'total_sqft', label: 'Total', unit: 'sq.ft', kind: 'derived', dp: 4, width: '104px' },
+      // The quantities a QS is actually looking for, beside the inputs they
+      // come from. Clicking one opens the working -- which is where the height
+      // formula was hiding.
+      { key: '_wall', label: 'Wall', unit: 'sq.m', kind: 'derived', width: '92px',
+        title: 'perimeter x (floor height - slab), less the room\u2019s own door '
+             + 'and window openings. Click for the working.',
+        get: row => qty(row, 'wall_finish'),
+        render: v => (v === null ? '<span class="muted">\u2014</span>' : fmt.n(v, 2)) },
+      { key: '_dado', label: 'Dado', unit: 'sq.m', kind: 'derived', width: '88px',
+        title: 'perimeter x dado height, less the part of each opening below it.',
+        get: row => qty(row, 'dado'),
+        render: v => (v === null ? '<span class="muted">\u2014</span>' : fmt.n(v, 2)) },
+      { key: '_skirting', label: 'Skirting', unit: 'RM', kind: 'derived', width: '90px',
+        title: 'perimeter, less the WIDTH of each door \u2014 not its area (C-35).',
+        get: row => qty(row, 'skirting'),
+        render: v => (v === null ? '<span class="muted">\u2014</span>' : fmt.n(v, 2)) },
       { key: '_del', label: '', kind: 'delete', width: '34px' },
     ],
     rows: data.rooms,
@@ -130,7 +153,10 @@ async function renderRooms(main, ref, id) {
     onDerivedClick: (row, col) => {
       if (col.key === 'area_sqft') {
         showDerivation(`${row.label} — area`, row.area_sqft, row.derivation, { unit: 'sq.ft' });
+        return;
       }
+      const rule = { _wall: 'wall_finish', _dado: 'dado', _skirting: 'skirting' }[col.key];
+      if (rule) showQuantity(row, rule, data);
     },
   });
 
@@ -259,4 +285,48 @@ function heightNote(data) {
     ${here ? here.count : 0} of this type's ${total} placements. It also sits on
     floors of ${others} — the take-off measures those walls separately rather
     than averaging them.</p>`;
+}
+
+
+/** One room quantity, from what the API already computed for this screen. */
+function qty(room, rule) {
+  const q = (room.quantities || []).find(x => x.rule === rule);
+  return q && q.net !== null && q.net !== undefined ? q.net : null;
+}
+
+/** The working behind a room quantity, including the deduction it carries. */
+function showQuantity(room, rule, data) {
+  const q = (room.quantities || []).find(x => x.rule === rule);
+  if (!q) return;
+  if (q.error) {
+    openPanel(`${room.label} — ${rule}`,
+      `<div class="deriv-note">${escapeHtml(q.error)}</div>`);
+    return;
+  }
+
+  const ded = q.deduction_derivation;
+  const openings = (ded && ded.inputs || []).map(i => `
+    <div class="deriv-input">
+      <div><div class="n">${escapeHtml(i.name)}</div>
+        ${i.source ? `<div class="deriv-src">${escapeHtml(i.source)}</div>` : ''}</div>
+      <div class="v">−${fmt.n(i.value, 3)}</div>
+    </div>`).join('');
+
+  showDerivation(`${room.label} — ${escapeHtml(q.gross_derivation.rule)}`,
+    q.gross, q.gross_derivation, {
+      unit: q.unit,
+      extra: `
+        ${openings ? `<h4 class="deriv-h">Less this room's own openings</h4>
+          <div class="muted" style="font-size:12px;margin-bottom:6px">
+            ${escapeHtml(q.deduction_rule)} — a fold over the openings actually in
+            this room, not a hand-picked list of cells (C-13).</div>
+          <div class="deriv-inputs">${openings}</div>` : ''}
+        <h4 class="deriv-h">Net</h4>
+        <div class="deriv-expr">${fmt.n(q.gross, 3)} − ${fmt.n(q.deduction, 3)}
+          = ${fmt.n(q.net, 3)} ${escapeHtml(q.unit)}</div>
+        ${data.heights && data.heights.length > 1 ? `
+          <div class="deriv-note">This unit type sits on floors of more than one
+          height, so the take-off measures each separately. Shown here at
+          ${fmt.n(data.floor_height_m, 2)} m.</div>` : ''}`,
+    });
 }

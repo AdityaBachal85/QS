@@ -7,7 +7,7 @@
 
 import { api, fmt, refresh, route } from '../app.js';
 import { createGrid } from '../grid.js';
-import { escapeHtml } from '../panel.js';
+import { escapeHtml, showUsage } from '../panel.js';
 
 route('/parameters', async (main) => {
   const params = await api.get('/parameters');
@@ -36,10 +36,19 @@ route('/parameters', async (main) => {
         render: v => v
           ? `<span class="muted">${escapeHtml(v)}</span>`
           : '<span class="tag warn">no description — nobody knows what this is</span>' },
+      { key: '_used', label: 'Used by', kind: 'derived', width: '110px', align: 'left',
+        title: 'Every quantity and rate that depends on this number. Change it '
+             + 'and all of them move — which is the question the workbook '
+             + 'cannot answer at all.',
+        get: () => null,
+        render: () => '<a class="link-quiet" href="#">where is this used?</a>' },
       { key: 'source', label: 'From', kind: 'derived', width: '250px', align: 'left',
         render: v => `<span class="muted mono" style="font-size:11px">${escapeHtml(v || '')}</span>` },
     ],
     rows: params,
+    onDerivedClick: (row, col) => {
+      if (col.key === '_used') showUsage('parameter', row.key, row.key);
+    },
     reload: refresh,
     onCommit: (row, col, value) => api.put(`/parameters/${row.key}`, { value }),
   });

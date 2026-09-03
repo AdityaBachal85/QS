@@ -497,3 +497,28 @@ def finish_totals(model: ProjectModel, params: ParameterSet) -> dict[str, Any]:
         "line_count": len(lines),
         "unit_types": len({l.unit_type_id for l in lines}),
     }
+
+
+def usage(model: ProjectModel, params: ParameterSet, kind: str,
+          subject: str) -> dict[str, Any]:
+    """Where a value is used -- the question provenance cannot answer.
+
+    "If I change this, what moves?" The workbook has no way to ask it: 10.764
+    is typed into hundreds of formulas with nothing linking them, which is why
+    nobody dares touch one.
+    """
+    from qs_engine.rules import usage as U
+
+    finder = {"parameter": U.parameter_usage, "rate": U.rate_usage,
+              "room": U.room_usage}.get(kind)
+    if finder is None:
+        raise KeyError(f"cannot look up usage of a {kind!r}")
+
+    found = finder(subject, model, params)
+    return {
+        "subject": found.subject, "kind": found.kind,
+        "description": found.description, "note": found.note,
+        "total_amount": found.total_amount, "total_lines": found.total_lines,
+        "uses": [{"where": u.where, "detail": u.detail, "quantity": u.quantity,
+                  "unit": u.unit, "amount": u.amount} for u in found.uses],
+    }
