@@ -60,7 +60,7 @@ def headline(model: ProjectModel, params: ParameterSet) -> dict[str, Any]:
         "rooms": len(model.unit_type_rooms),
         "rate_items": len(model.rate_items),
         "health": {
-            "score": round(validate(model, params).health_score()),
+            "score": round(report.health_score()),
             "blocking": len(report.blocking),
             "warnings": len(report.of(Severity.WARNING)),
             "info": len(report.of(Severity.INFO)),
@@ -260,8 +260,14 @@ def rates(model: ProjectModel, params: ParameterSet) -> list[dict[str, Any]]:
 # The finishing take-off -- where quantities meet rates
 # --------------------------------------------------------------------------
 
-def _line_json(line) -> dict[str, Any]:
-    return {
+def _line_json(line, *, working: bool = False) -> dict[str, Any]:
+    """One take-off line.
+
+    ``working`` carries the three derivation blocks. They are 54% of the
+    payload and a QS opens one at a time, so the list omits them and the
+    derivation route serves whichever is clicked.
+    """
+    out = {
         "unit_type_id": line.unit_type_id, "unit_type": line.unit_type_code,
         "room_id": line.room_id, "room": line.room_label,
         "finish": line.finish_name, "finish_slot_id": line.finish_slot_id,
@@ -272,13 +278,33 @@ def _line_json(line) -> dict[str, Any]:
         "rate": line.rate, "amount_per_unit": line.amount_per_unit,
         "total_amount": line.total_amount,
         "status": line.status, "message": line.message,
-        "gross_derivation": _derivation(line.gross_derivation)
-        if line.gross_derivation else None,
-        "deduction_derivation": _derivation(line.deduction_derivation)
-        if line.deduction_derivation else None,
-        "rate_derivation": _derivation(line.rate_derivation)
-        if line.rate_derivation else None,
+        "floor_height_m": line.floor_height_m, "floor_scope": line.floor_scope,
     }
+    if working:
+        out.update({
+            "gross_derivation": _derivation(line.gross_derivation)
+            if line.gross_derivation else None,
+            "deduction_derivation": _derivation(line.deduction_derivation)
+            if line.deduction_derivation else None,
+            "rate_derivation": _derivation(line.rate_derivation)
+            if line.rate_derivation else None,
+        })
+    return out
+
+
+def takeoff_derivation(model: ProjectModel, params: ParameterSet, room_id: str,
+                       finish_slot_id: str, unit_type_id: str | None = None,
+                       floor_height_m: float | None = None) -> dict[str, Any] | None:
+    """The working behind one figure, fetched when somebody clicks it."""
+    from qs_engine.rules.takeoff import compute_takeoff
+
+    for line in compute_takeoff(model, params, unit_type_id):
+        if line.room_id != room_id or line.finish_slot_id != finish_slot_id:
+            continue
+        if floor_height_m is not None and line.floor_height_m != floor_height_m:
+            continue
+        return _line_json(line, working=True)
+    return None
 
 
 def _group_json(groups) -> list[dict[str, Any]]:
@@ -324,7 +350,7 @@ def room_costs(model: ProjectModel, params: ParameterSet,
 
     out: dict[str, list[dict[str, Any]]] = {}
     for line in compute_takeoff(model, params, unit_type_id):
-        out.setdefault(line.room_id, []).append(_line_json(line))
+        out.setdefault(line.room_id, []).append(_line_json(line, working=True))
     return out
 
 

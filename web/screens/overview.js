@@ -2,10 +2,12 @@ import { api, fmt, route } from '../app.js';
 import { escapeHtml } from '../panel.js';
 
 route('/overview', async (main) => {
-  const [h, recon] = await Promise.all([
-    api.get('/headline'),
-    api.get('/reconciliation').catch(() => null),
-  ]);
+  // Reconciliation reads the workbook, which is slow the first time in a
+  // session. Awaiting it here used to hold the whole screen for 5.4 seconds
+  // before anything appeared. It now fills in on its own.
+  const reconciling = api.get('/reconciliation').catch(() => null);
+  const h = await api.get('/headline');
+  const recon = null;
 
   const bhk = Object.entries(h.classification)
     .filter(([k]) => k !== 'Office')
@@ -47,18 +49,13 @@ route('/overview', async (main) => {
       </div>
     </div>
 
-    ${recon ? `
-    <div class="card">
-      <h2>Reconciliation against the workbook
-        <span class="sub">${escapeHtml(recon.workbook)}</span></h2>
-      <div class="card-body">
-        <span class="chip ok">${recon.pass} PASS</span>
-        <span class="chip warn" style="margin-left:6px">${recon.explained} EXPLAINED</span>
-        <span class="chip ${recon.fail ? 'bad' : 'mute'}" style="margin-left:6px">${recon.fail} FAIL</span>
-        <p class="muted" style="margin-bottom:0">Every figure the platform computes, beside the
-        workbook's own cached value. <a href="#/reconciliation">See all ${recon.lines.length} lines</a>.</p>
+    <div class="card" id="reconCard">
+      <h2>Reconciliation against the workbook</h2>
+      <div class="card-body" id="reconBody">
+        <div class="skeleton-row"></div>
+        <p class="muted" style="margin-bottom:0">Reading the workbook…</p>
       </div>
-    </div>` : ''}
+    </div>
 
     <div class="card">
       <h2>Health <span class="sub">${h.health.blocking} blocking · ${h.health.warnings} warnings</span></h2>
@@ -67,4 +64,21 @@ route('/overview', async (main) => {
         blocking. <a href="#/validation">Open the issue list</a>.</p>
       </div>
     </div>`;
+
+  // Fill the reconciliation card when the workbook comes back.
+  reconciling.then(recon => {
+    const card = document.getElementById('reconCard');
+    const body = document.getElementById('reconBody');
+    if (!card || !body) return;              // navigated away already
+    if (!recon) { card.remove(); return; }
+    card.querySelector('h2').innerHTML =
+      `Reconciliation against the workbook
+       <span class="sub">${escapeHtml(recon.workbook)}</span>`;
+    body.innerHTML = `
+      <span class="chip ok">${recon.pass} PASS</span>
+      <span class="chip warn" style="margin-left:6px">${recon.explained} EXPLAINED</span>
+      <span class="chip ${recon.fail ? 'bad' : 'mute'}" style="margin-left:6px">${recon.fail} FAIL</span>
+      <p class="muted" style="margin-bottom:0">Every figure the platform computes, beside the
+      workbook's own cached value. <a href="#/reconciliation">See all ${recon.lines.length} lines</a>.</p>`;
+  });
 });

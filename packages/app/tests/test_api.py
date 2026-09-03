@@ -176,17 +176,38 @@ def test_the_wall_derivation_names_where_its_height_came_from(client):
     "/", "/static/app.js", "/static/style.css",
     "/static/screens/finish-totals.js", "/static/screens/openings.js",
 ])
-def test_the_ui_is_never_cached(client, path):
+def test_the_ui_always_revalidates(client, path):
     """The regression that made a pulled build invisible.
 
     Starlette sends `etag` and `last-modified` but no `Cache-Control`, and the
     module URLs carry no version, so a browser applies heuristic freshness and
     reuses `app.js` for hours. A route added to the new `app.js` is then never
     registered and its screen comes up empty.
+
+    What matters is that the browser may never reuse a copy without asking, so
+    either directive is correct: `no-store` forbids keeping it, `no-cache`
+    keeps it but forces revalidation.
     """
     response = client.get(path)
     assert response.status_code == 200
-    assert "no-store" in response.headers.get("cache-control", "")
+    directive = response.headers.get("cache-control", "")
+    assert "no-store" in directive or "no-cache" in directive, \
+        f"{path} may be served from cache without revalidating: {directive!r}"
+
+
+def test_static_assets_revalidate_cheaply(client):
+    """A conditional request returns 304 rather than the file again.
+
+    `no-store` also guaranteed freshness, but forbade keeping the file at all,
+    so every load re-downloaded all fifteen modules.
+    """
+    first = client.get("/static/app.js")
+    etag = first.headers.get("etag")
+    assert etag, "no etag to revalidate against"
+
+    again = client.get("/static/app.js", headers={"If-None-Match": etag})
+    assert again.status_code == 304
+    assert not again.content
 
 
 def test_the_running_build_is_reported(client):

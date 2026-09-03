@@ -306,3 +306,14 @@ td.editing select {
 .warn-text { color: var(--bad); font-weight: 600; }
 
 .build { display: flex; align-items: center; margin-left: 8px; }
+
+/* Placeholder for content that is genuinely slow to fetch -- reserves the
+   space so nothing jumps when it lands (CLS), and reads as progress rather
+   than as an empty card. */
+.skeleton-row {
+  height: 22px; max-width: 280px; border-radius: 5px; margin-bottom: 10px;
+  background: linear-gradient(90deg, var(--line) 25%, var(--surface) 37%, var(--line) 63%);
+  background-size: 400% 100%; animation: shimmer 1.4s ease-in-out infinite;
+}
+@keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+@media (prefers-reduced-motion: reduce) { .skeleton-row { animation: none; } }

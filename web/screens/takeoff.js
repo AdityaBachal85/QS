@@ -151,24 +151,28 @@ route('/takeoff', async (main) => {
       ],
       rows: rows.slice(0, 400),
       emptyMessage: 'Nothing matches that filter.',
-      onDerivedClick: (row, col) => {
+      onDerivedClick: async (row, col) => {
+        // The working is fetched for the one figure clicked. Shipping all three
+        // derivations on every line made this payload 2 MB, 54% of it panels
+        // nobody had opened.
+        const full = await working(row);
         if (col.key === 'total_qty' || col.key === 'net') {
-          showDerivation(`${row.room} — ${row.finish}`, row.net, row.gross_derivation, {
+          showDerivation(`${row.room} — ${row.finish}`, row.net, full.gross_derivation, {
             unit: row.unit,
-            extra: row.deduction_derivation ? `
+            extra: full.deduction_derivation ? `
               <h4 class="deriv-h">Less, for this room's own openings</h4>
-              <div class="deriv-expr">${escapeHtml(row.deduction_derivation.expression)}</div>
-              ${(row.deduction_derivation.inputs || []).map(i => `
+              <div class="deriv-expr">${escapeHtml(full.deduction_derivation.expression)}</div>
+              ${(full.deduction_derivation.inputs || []).map(i => `
                 <div class="deriv-input"><div class="n">${escapeHtml(i.name)}</div>
                   <div class="v">−${fmt.n(i.value, 3)}</div></div>`).join('')}
-              ${row.deduction_derivation.note
-                ? `<div class="deriv-note">${escapeHtml(row.deduction_derivation.note)}</div>` : ''}
+              ${full.deduction_derivation.note
+                ? `<div class="deriv-note">${escapeHtml(full.deduction_derivation.note)}</div>` : ''}
               <h4 class="deriv-h">Then</h4>
               <div class="deriv-expr">${fmt.n(row.net, 3)} ${escapeHtml(row.unit)}
                 × ${row.unit_count} units = ${fmt.n(row.total_qty, 2)}</div>` : '',
           });
         } else if (col.key === 'rate' || col.key === 'total_amount') {
-          showDerivation(row.rate_description || row.finish, row.rate, row.rate_derivation, {
+          showDerivation(row.rate_description || row.finish, row.rate, full.rate_derivation, {
             unit: `per ${row.unit}`,
             format: v => v === null ? '— no rate' : `₹${fmt.n(v, 4)}`,
             extra: row.status === 'priced' ? `
@@ -184,3 +188,24 @@ route('/takeoff', async (main) => {
   document.getElementById('q').addEventListener('input', drawLines);
   drawLines();
 });
+
+
+// One line's working, fetched on demand and remembered for the session.
+const workingCache = new Map();
+
+async function working(row) {
+  const key = `${row.room_id}|${row.finish_slot_id}|${row.floor_height_m ?? ''}`;
+  if (!workingCache.has(key)) {
+    const query = new URLSearchParams({
+      room_id: row.room_id, finish_slot_id: row.finish_slot_id,
+    });
+    if (row.unit_type_id) query.set('unit_type_id', row.unit_type_id);
+    if (row.floor_height_m != null) query.set('floor_height_m', row.floor_height_m);
+    try {
+      workingCache.set(key, await api.get(`/takeoff/derivation?${query}`));
+    } catch {
+      workingCache.set(key, row);        // fall back to whatever the row holds
+    }
+  }
+  return workingCache.get(key);
+}

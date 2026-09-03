@@ -38,6 +38,26 @@ DB_PATH = Path(os.environ.get("QS_DB", ROOT / "qs.db"))
 WORKBOOK = ROOT / "data" / "workbooks" / "20240131 - AVS Budget R0 - Discussion.xlsx"
 
 
+def imported_workbook():
+    """The workbook, imported once and reused until the file changes.
+
+    ``import_workbook`` runs openpyxl over a 1 MB file twice -- once for
+    formulas, once for cached values -- and takes 5.4 seconds.  It was being
+    called on every ``/api/reconciliation`` request, and the Overview screen
+    asks for reconciliation on load, so every cold start paid it before showing
+    anything.
+
+    Keyed on the file's mtime, so editing the workbook still re-reads it.
+    """
+    from qs_importer.pipeline import import_workbook
+
+    stamp = WORKBOOK.stat().st_mtime_ns if WORKBOOK.exists() else 0
+    cached = getattr(imported_workbook, "_cached", None)
+    if cached is None or cached[0] != stamp:
+        imported_workbook._cached = (stamp, import_workbook(WORKBOOK))
+    return imported_workbook._cached[1]
+
+
 def build_stamp() -> dict[str, Any]:
     """The running commit, read from git once and remembered.
 
@@ -180,6 +200,23 @@ def get_finish_totals() -> dict[str, Any]:
     return service.finish_totals(model, params)
 
 
+@app.get("/api/takeoff/derivation")
+def get_takeoff_derivation(room_id: str, finish_slot_id: str,
+                           unit_type_id: str | None = None,
+                           floor_height_m: float | None = None) -> dict[str, Any]:
+    """The working behind one take-off figure.
+
+    The list endpoint used to carry a derivation on every line -- 54% of a 2 MB
+    payload, for three panels a QS opens one at a time.
+    """
+    model, params = state.require()
+    found = service.takeoff_derivation(model, params, room_id, finish_slot_id,
+                                       unit_type_id, floor_height_m)
+    if found is None:
+        raise HTTPException(404, "no take-off line for that room and finish")
+    return found
+
+
 @app.get("/api/room-type-mapping")
 def get_room_type_mapping() -> dict[str, Any]:
     model, _ = state.require()
@@ -279,10 +316,9 @@ def get_reconciliation() -> dict[str, Any]:
     """
     if not WORKBOOK.exists():
         raise HTTPException(404, f"workbook not found at {WORKBOOK}")
-    from qs_importer.pipeline import import_workbook
     from qs_importer.reconcile import build_lines
 
-    result = import_workbook(WORKBOOK)
+    result = imported_workbook()
     lines = build_lines(result)
     return {
         "workbook": WORKBOOK.name,
@@ -573,13 +609,19 @@ def version() -> dict[str, Any]:
 #: from caching it and a whole class of "I pulled and nothing happened" to lose.
 NO_STORE = "no-store, no-cache, must-revalidate, max-age=0"
 
+#: Static assets must revalidate every time -- that is what stops a pulled build
+#: from being invisible.  ``no-cache`` does exactly that, and unlike
+#: ``no-store`` it still lets the browser keep the file and take a 304, so a
+#: reload does not re-download all fifteen modules.
+REVALIDATE = "no-cache"
+
 
 class NoStoreStatic(StaticFiles):
-    """Static files that a reload always re-fetches."""
+    """Static files the browser must revalidate before reusing."""
 
     def file_response(self, *args: Any, **kwargs: Any):  # noqa: ANN201
         response = super().file_response(*args, **kwargs)
-        response.headers["Cache-Control"] = NO_STORE
+        response.headers["Cache-Control"] = REVALIDATE
         return response
 
 
