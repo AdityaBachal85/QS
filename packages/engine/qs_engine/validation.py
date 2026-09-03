@@ -85,6 +85,88 @@ def rule(name: str) -> Callable[[Rule], Rule]:
 
 # --------------------------------------------------------------------------
 
+#: What a rate list writes in the specification column when a finish does not
+#: apply to a room at all -- a bedroom has no dado, a duct has no flooring.
+_NOT_APPLICABLE = {"N.A", "NA", "N/A", "NOT APPLICABLE"}
+
+
+def not_applicable(item) -> bool:
+    """True when the rate list says this finish does not apply to the room.
+
+    100 rows carry it (79 in the flats list, 21 in the office list) and the
+    take-off tests it 1,790 times as ``IF(I5="N.A",0,...)``.  Without this,
+    every one of them was reported as a *missing price* -- work somebody forgot
+    to cost -- which is a different thing entirely, and the false alarms buried
+    the four real ones.
+    """
+    return " ".join(str(item.specification or "").split()).upper().rstrip(".") \
+        in {s.rstrip(".") for s in _NOT_APPLICABLE}
+
+
+@rule("EXCLUDED_BY_SPEC")
+def excluded_by_spec(model: ProjectModel, params: ParameterSet) -> Iterable[Finding]:
+    """Finishes the rate list marks "N.A." for a room.
+
+    Reported rather than silently dropped: an exclusion carries a reason and
+    keeps its row (C-2). The workbook's own take-off already computes zero for
+    these, so nothing here changes a number -- it changes what the finding is
+    called.
+    """
+    slots = {s.id: s for s in model.finish_slots}
+    for spec in model.room_finish_specs:
+        if not spec.rate_item_id:
+            continue
+        try:
+            item = model.rate_item(spec.rate_item_id)
+        except KeyError:
+            continue
+        if not not_applicable(item):
+            continue
+        slot = slots.get(spec.finish_slot_id)
+        room = model.room_type(spec.room_type_id)
+        yield Finding("EXCLUDED_BY_SPEC", Severity.INFO,
+                      f"{slot.name if slot else 'finish'} does not apply to "
+                      f"{room.name} -- the rate list specification reads "
+                      f"'N.A.'. Not an unpriced item.",
+                      "finish_spec", spec.id)
+
+
+@rule("DUPLICATE_FINISH_SCHEDULE")
+def duplicate_finish_schedule(model: ProjectModel,
+                              params: ParameterSet) -> Iterable[Finding]:
+    """One room type carrying the same finish slot twice.
+
+    ``Lift Lobby``, ``Lift Shaft`` and ``Staircase Area`` each head a block in
+    *both* rate lists, with different specifications -- one says Dado is N.A.,
+    the other prices it -- and both fold into one room type, so every room
+    priced on it picks up the slot twice.
+
+    Deliberately reported rather than merged or split. Splitting them moves the
+    finishing take-off 16% away from the workbook, which means the workbook is
+    counting something here that this reading does not explain, and a number
+    nobody can explain must not be changed quietly.
+    """
+    seen: dict[tuple[str, str], int] = {}
+    for spec in model.room_finish_specs:
+        key = (spec.room_type_id, spec.finish_slot_id)
+        seen[key] = seen.get(key, 0) + 1
+
+    slots = {s.id: s for s in model.finish_slots}
+    for (room_type_id, slot_id), count in sorted(seen.items()):
+        if count < 2:
+            continue
+        slot = slots.get(slot_id)
+        room = model.room_type(room_type_id)
+        rooms = sum(1 for r in model.unit_type_rooms
+                    if model.pricing_room_type(r.room_type_id) == room_type_id)
+        yield Finding("DUPLICATE_FINISH_SCHEDULE", Severity.WARNING,
+                      f"{room.name} carries {count} "
+                      f"{slot.name if slot else 'finish'} rows, from two rate "
+                      f"blocks of the same name. {rooms} room(s) are priced on "
+                      f"it, so the slot is applied {count} times.",
+                      "room_type", room_type_id, value=count)
+
+
 @rule("MISSING_RATE")
 def missing_rate(model: ProjectModel, params: ParameterSet) -> Iterable[Finding]:
     """Quantity defined but no rate.
@@ -95,6 +177,8 @@ def missing_rate(model: ProjectModel, params: ParameterSet) -> Iterable[Finding]
     -- and that figure has never entered a total.
     """
     for item in model.rate_items:
+        if not_applicable(item):
+            continue          # reported by EXCLUDED_BY_SPEC, not missing a price
         revision = model.current_revision(item.id)
         if revision is None:
             yield Finding("MISSING_RATE", Severity.BLOCKING,

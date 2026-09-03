@@ -125,9 +125,64 @@ def test_acceptance_rates_survive_the_import(model, params):
 
 
 def test_unpriced_items_are_blocking_not_zero(model, params):
-    """C-11: an item with a quantity and no rate is an error, not a zero."""
+    """C-11: an item with a quantity and no rate is an error, not a zero.
+
+    Built rather than found, because the AVS list happens to contain none once
+    the "N.A." rows are recognised for what they are -- and a gate that only
+    fires on one workbook is not a gate.
+    """
+    import copy
+
+    from qs_engine.model import BuildupMethod, RateItem, RateRevision
     from qs_engine.validation import Severity, validate
-    report = validate(model, params, only=["MISSING_RATE"])
+
+    m = copy.deepcopy(model)
+    m.rate_items.append(RateItem(
+        id="forgotten", project_id=m.project.id, code="FORGOT",
+        description="Granite Basin Counter", unit="SQM",
+        specification="Granite, 18mm"))
+    m.rate_revisions.append(RateRevision(
+        id="forgotten-rev", rate_item_id="forgotten",
+        method=BuildupMethod.AREA_SIMPLE))
+
+    report = validate(m, params, only=["MISSING_RATE"])
     assert report.blocking
     assert not report.can_issue
     assert all(f.severity is Severity.BLOCKING for f in report.blocking)
+    assert any(f.entity_id == "forgotten" for f in report.blocking)
+
+
+def test_a_finish_the_rate_list_calls_N_A_is_not_a_missing_price(model, params):
+    """Two different things that looked identical.
+
+    100 rate rows carry a specification of "N.A." -- the rate list saying a
+    finish does not apply to that room -- and the take-off tests it 1,790 times
+    as ``IF(I5="N.A",0,...)``. Every one was being reported as work somebody
+    forgot to price, and the false alarms buried the real ones.
+    """
+    from qs_engine.validation import validate
+
+    excluded = [i for i in model.rate_items
+                if str(i.specification).strip().upper().rstrip(".") in ("N.A", "NA")]
+    assert excluded, "the AVS rate lists mark finishes N.A."
+
+    report = validate(model, params, only=["MISSING_RATE"])
+    flagged = {f.entity_id for f in report.blocking}
+    assert not flagged & {i.id for i in excluded}, \
+        "an explicitly excluded finish is not an unpriced one"
+
+
+def test_a_room_type_carrying_a_slot_twice_is_reported(model, params):
+    """`Lift Lobby` heads a block in both rate lists, with different specs.
+
+    Both fold into one room type, so every room priced on it picks the slot up
+    twice. Reported rather than merged or split: splitting moves the finishing
+    take-off 16% away from the workbook, and a difference nobody can explain
+    must not be applied quietly.
+    """
+    from qs_engine.validation import validate
+
+    report = validate(model, params, only=["DUPLICATE_FINISH_SCHEDULE"])
+    names = {f.entity_id for f in report.findings}
+    assert names, "the AVS rate lists repeat three block names"
+    assert any("lift-lobby" in n for n in names)
