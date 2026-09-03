@@ -21,16 +21,18 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import (Body, Cookie, Depends, FastAPI, HTTPException,
+                     Response)
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from qs_engine.model import ProjectModel, RoomOpening
 from qs_engine.params import ParameterSet
 
-from . import crud, service
+from . import auth, crud, service
+from .auth import Role, User
 from .crud import CrudError
-from .store import Store
+from .store import Store, current_actor
 
 ROOT = Path(__file__).resolve().parents[3]
 WEB = ROOT / "web"
@@ -116,12 +118,251 @@ class State:
 
 
 state = State()
-app = FastAPI(title="DBOT QS Platform", version="0.5.0", docs_url="/api/docs")
+app = FastAPI(title="DBOT QS Platform", version="0.6.0", docs_url="/api/docs")
+
+
+# --------------------------------------------------------------------------
+# Who is asking
+# --------------------------------------------------------------------------
+#
+# Until now every audit row said "local". A change log that cannot name a
+# person is a list of events, not an account of what happened -- which is why
+# the workbook carries two shuttering rates Rs 1.25 crore apart with nothing
+# saying who set either, or when (C-7).
+#
+# With no accounts defined the platform is open, so a fresh clone still runs
+# with `make run` and no ceremony. The moment somebody creates the first
+# account it is closed, and stays closed.
+
+def signed_in(qs_session: str | None = Cookie(default=None)) -> User | None:
+    """The user behind this request, or None when nobody is signed in."""
+    if not qs_session:
+        return None
+    row = state.store.session(qs_session)
+    if row is None or auth.is_expired(row["expires_at"]):
+        if row is not None:
+            state.store.end_session(qs_session)
+        return None
+    record = state.store.user_by_id(row["user_id"])
+    if record is None or not record["is_active"]:
+        return None
+    return User(id=record["id"], email=record["email"], name=record["name"],
+                role=Role(record["role"]), is_active=bool(record["is_active"]))
+
+
+@app.middleware("http")
+async def name_the_actor(request, call_next):
+    """Put the signed-in person where the audit log will find them.
+
+    This has to be middleware rather than a dependency. FastAPI runs a sync
+    endpoint in a threadpool with a *copy* of the context, so a contextvar set
+    inside a dependency never reaches the handler -- every audit row kept
+    saying "local", which is precisely the failure this feature exists to fix.
+    Middleware runs before the copy is taken, so the value travels.
+    """
+    token = current_actor.set(_actor_for(request.cookies.get(auth.SESSION_COOKIE)))
+    try:
+        return await call_next(request)
+    finally:
+        current_actor.reset(token)
+
+
+def _actor_for(session_token: str | None) -> str:
+    if not session_token:
+        return "local"
+    row = state.store.session(session_token)
+    if row is None or auth.is_expired(row["expires_at"]):
+        return "local"
+    record = state.store.user_by_id(row["user_id"])
+    if record is None:
+        return "local"
+    return f"{record['name']} <{record['email']}>"
+
+
+def writer(user: User | None = Depends(signed_in)) -> User | None:
+    """Refuse a write the signed-in user may not make."""
+    if state.store.user_count() == 0:
+        return user                         # nobody has set up accounts yet
+    if user is None:
+        raise HTTPException(401, "sign in to make changes")
+    if not user.may_write():
+        raise HTTPException(
+            403, f"{user.name} is a {user.role.value} and may read but not "
+                 f"change project data. A reviewer's job is to disagree with a "
+                 f"number, not to replace it.")
+    return user
 
 
 # --------------------------------------------------------------------------
 # Read -- everything here is computed by the engine on request
 # --------------------------------------------------------------------------
+
+@app.get("/api/me")
+def get_me(user: User | None = Depends(signed_in)) -> dict[str, Any]:
+    """Who is signed in, and whether accounts are in use at all."""
+    return {
+        "signed_in": user is not None,
+        "open_access": state.store.user_count() == 0,
+        "user": None if user is None else {
+            "id": user.id, "email": user.email, "name": user.name,
+            "role": user.role.value, "may_write": user.may_write(),
+            "may_approve": user.may_approve(),
+            "may_administer": user.may_administer()},
+    }
+
+
+@app.post("/api/login")
+def login(response: Response, payload: dict = Body(...)) -> dict[str, Any]:
+    record = state.store.user_by_email(str(payload.get("email", "")))
+    password = str(payload.get("password", ""))
+    # One message for both failures, so it cannot be used to discover which
+    # addresses have accounts.
+    if record is None or not record["is_active"] or \
+            not auth.verify_password(password, record["password_hash"]):
+        raise HTTPException(401, "that email and password do not match")
+
+    token = auth.new_session_token()
+    state.store.start_session(token, record["id"], auth.session_expiry())
+    response.set_cookie(auth.SESSION_COOKIE, token, httponly=True,
+                        samesite="lax", max_age=auth.SESSION_HOURS * 3600)
+    return {"ok": True, "user": {"name": record["name"], "role": record["role"]}}
+
+
+@app.post("/api/logout")
+def logout(response: Response,
+           qs_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    if qs_session:
+        state.store.end_session(qs_session)
+    response.delete_cookie(auth.SESSION_COOKIE)
+    return {"ok": True}
+
+
+@app.get("/api/users")
+def list_users(user: User | None = Depends(signed_in)) -> list[dict[str, Any]]:
+    if state.store.user_count() and (user is None or not user.may_administer()):
+        raise HTTPException(403, "only an admin can see the user list")
+    return state.store.users()
+
+
+@app.post("/api/users")
+def create_user(payload: dict = Body(...),
+                user: User | None = Depends(signed_in)) -> dict[str, Any]:
+    """Add an account.
+
+    The first needs no sign-in -- somebody has to be able to create it -- and
+    is an admin by definition. Every one after that needs an admin.
+    """
+    first = state.store.user_count() == 0
+    if not first and (user is None or not user.may_administer()):
+        raise HTTPException(403, "only an admin can add users")
+
+    email = str(payload.get("email", "")).strip().lower()
+    name = str(payload.get("name", "")).strip()
+    role = Role.ADMIN.value if first else str(payload.get("role", "qs"))
+    if not email or not name:
+        raise HTTPException(400, "an account needs a name and an email address")
+    if state.store.user_by_email(email):
+        raise HTTPException(409, f"{email} already has an account")
+    try:
+        Role(role)
+        password_hash = auth.hash_password(str(payload.get("password", "")))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    created = state.store.create_user(crud.slug(email)[:40] or "user", email,
+                                      name, role, password_hash)
+    return {"ok": True, "first_user": first,
+            "user": {k: v for k, v in created.items() if k != "password_hash"}}
+
+
+# --------------------------------------------------------------------------
+# The project dashboard
+# --------------------------------------------------------------------------
+
+@app.get("/api/dashboard")
+def get_dashboard() -> dict[str, Any]:
+    """Every project, with enough of its shape to choose between them."""
+    out = []
+    for row in state.store.projects():
+        meta = state.store.project_meta(row["id"])
+        entry = {**row, "archived": bool(meta.get("archived")),
+                 "updated_at": meta.get("updated_at"),
+                 "created_at": meta.get("created_at"), "open": row["id"] == state.project_id}
+        try:
+            model = state.model if row["id"] == state.project_id \
+                else state.store.load(row["id"])
+            params = state.params if row["id"] == state.project_id \
+                else state.store.load_params(row["id"])
+            entry.update(service.project_card(model, params))
+        except Exception as exc:                       # a project that will not load
+            entry["error"] = str(exc)
+        out.append(entry)
+    return {"projects": out, "open": state.project_id}
+
+
+@app.post("/api/projects/open")
+def open_project(payload: dict = Body(...),
+                 _: User | None = Depends(writer)) -> dict[str, Any]:
+    project_id = str(payload.get("project_id", ""))
+    if not state.store.exists(project_id):
+        raise HTTPException(404, f"no project {project_id!r}")
+    state.open(project_id)
+    return {"ok": True, **_touched()}
+
+
+@app.post("/api/projects/duplicate")
+def duplicate_project(payload: dict = Body(...),
+                      _: User | None = Depends(writer)) -> dict[str, Any]:
+    """Copy a project under a new name.
+
+    A new estimate almost always starts from the last one. Copying gives every
+    record a fresh id, so the two can never share a row.
+    """
+    source_id = str(payload.get("project_id", "")) or state.project_id
+    name = str(payload.get("name", "")).strip()
+    if not source_id or not state.store.exists(source_id):
+        raise HTTPException(404, "no such project to copy")
+    if not name:
+        raise HTTPException(400, "the copy needs a name")
+
+    model = state.store.load(source_id)
+    params = state.store.load_params(source_id)
+    copied = service.duplicate(model, name)
+    state.store.save(copied, params)
+    state.open(copied.project.id)
+    return {"ok": True, "project_id": copied.project.id, **_touched()}
+
+
+@app.post("/api/projects/archive")
+def archive_project(payload: dict = Body(...),
+                    _: User | None = Depends(writer)) -> dict[str, Any]:
+    project_id = str(payload.get("project_id", ""))
+    if not state.store.exists(project_id):
+        raise HTTPException(404, f"no project {project_id!r}")
+    state.store.set_archived(project_id, bool(payload.get("archived", True)))
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# Excel export
+# --------------------------------------------------------------------------
+
+@app.get("/api/export.xlsx")
+def export_workbook() -> Response:
+    """The estimate as a workbook, for sending out.
+
+    Formulas, not values: a reader can see how every figure was reached and
+    check it in Excel. The work still happens here -- this is the copy that
+    leaves the building.
+    """
+    model, params = state.require()
+    data = service.export_workbook(model, params)
+    filename = f"{model.project.code or 'estimate'}.xlsx"
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
 
 @app.get("/api/headline")
 def get_headline() -> dict[str, Any]:
@@ -374,7 +615,8 @@ def _touched() -> dict[str, Any]:
 
 
 @app.put("/api/room-config/cell")
-def set_mix(payload: dict = Body(...)) -> dict[str, Any]:
+def set_mix(payload: dict = Body(...),
+            _: User | None = Depends(writer)) -> dict[str, Any]:
     """One cell of the floor x unit-type matrix."""
     model, _ = state.require()
     floor_id = payload["floor_id"]
@@ -400,7 +642,8 @@ def set_mix(payload: dict = Body(...)) -> dict[str, Any]:
 
 
 @app.put("/api/floors/{floor_id}")
-def set_floor(floor_id: str, payload: dict = Body(...)) -> dict[str, Any]:
+def set_floor(floor_id: str, payload: dict = Body(...),
+              _: User | None = Depends(writer)) -> dict[str, Any]:
     """A floor's height. Every wall quantity on that floor follows it."""
     model, _ = state.require()
     try:
@@ -421,7 +664,8 @@ ROOM_FIELDS = {"label", "count_per_unit", "carpet_area_sqm", "perimeter_m",
 
 
 @app.put("/api/rooms/{room_id}")
-def set_room(room_id: str, payload: dict = Body(...)) -> dict[str, Any]:
+def set_room(room_id: str, payload: dict = Body(...),
+             _: User | None = Depends(writer)) -> dict[str, Any]:
     """A room's dimensions. Note what is absent: no area in square feet.
 
     ``area_sqft`` is derived and has no field, no column and no endpoint, which
@@ -447,7 +691,8 @@ RATE_FIELDS = {"basic_rate", "laying_rate", "wastage_pct", "frame_width_m"}
 
 
 @app.put("/api/rates/{rate_item_id}")
-def set_rate(rate_item_id: str, payload: dict = Body(...)) -> dict[str, Any]:
+def set_rate(rate_item_id: str, payload: dict = Body(...),
+             _: User | None = Depends(writer)) -> dict[str, Any]:
     """A rate's components. The overall rate is computed, never set."""
     model, _ = state.require()
     revision = model.current_revision(rate_item_id)
@@ -466,7 +711,8 @@ def set_rate(rate_item_id: str, payload: dict = Body(...)) -> dict[str, Any]:
 
 
 @app.put("/api/opening-types/{opening_type_id}")
-def set_opening_type(opening_type_id: str, payload: dict = Body(...)) -> dict[str, Any]:
+def set_opening_type(opening_type_id: str, payload: dict = Body(...),
+                     _: User | None = Depends(writer)) -> dict[str, Any]:
     model, _ = state.require()
     try:
         opening = model.opening_type(opening_type_id)
@@ -482,7 +728,8 @@ def set_opening_type(opening_type_id: str, payload: dict = Body(...)) -> dict[st
 
 
 @app.put("/api/room-openings/{room_opening_id}")
-def set_room_opening(room_opening_id: str, payload: dict = Body(...)) -> dict[str, Any]:
+def set_room_opening(room_opening_id: str, payload: dict = Body(...),
+                     _: User | None = Depends(writer)) -> dict[str, Any]:
     """How many of an opening a room has. Changes every deduction that uses it."""
     model, _ = state.require()
     opening = next((o for o in model.room_openings if o.id == room_opening_id), None)
@@ -500,7 +747,8 @@ def set_room_opening(room_opening_id: str, payload: dict = Body(...)) -> dict[st
 
 
 @app.post("/api/rooms/{room_id}/openings")
-def add_room_opening(room_id: str, payload: dict = Body(...)) -> dict[str, Any]:
+def add_room_opening(room_id: str, payload: dict = Body(...),
+                     _: User | None = Depends(writer)) -> dict[str, Any]:
     """Add an opening to a room -- and watch the deductions move by themselves."""
     model, _ = state.require()
     opening_type_id = payload["opening_type_id"]
@@ -514,7 +762,8 @@ def add_room_opening(room_id: str, payload: dict = Body(...)) -> dict[str, Any]:
 
 
 @app.put("/api/parameters/{key}")
-def set_parameter(key: str, payload: dict = Body(...)) -> dict[str, Any]:
+def set_parameter(key: str, payload: dict = Body(...),
+                  _: User | None = Depends(writer)) -> dict[str, Any]:
     """Change a named parameter and every rate built on it moves at once."""
     model, params = state.require()
     try:
@@ -548,7 +797,8 @@ def list_collections() -> dict[str, Any]:
 
 
 @app.post("/api/collections/{name}")
-def create_record(name: str, payload: dict = Body(default={})) -> dict[str, Any]:
+def create_record(name: str, payload: dict = Body(default={}),
+                  _: User | None = Depends(writer)) -> dict[str, Any]:
     model, _ = state.require()
     try:
         item = crud.create(model, name, payload)
@@ -563,8 +813,8 @@ def create_record(name: str, payload: dict = Body(default={})) -> dict[str, Any]
 
 
 @app.patch("/api/collections/{name}/{entity_id}")
-def update_record(name: str, entity_id: str,
-                  payload: dict = Body(...)) -> dict[str, Any]:
+def update_record(name: str, entity_id: str, payload: dict = Body(...),
+                  _: User | None = Depends(writer)) -> dict[str, Any]:
     """Rename or re-point a record. Derived fields are refused."""
     model, _ = state.require()
     try:
@@ -587,7 +837,8 @@ def record_usage(name: str, entity_id: str) -> dict[str, Any]:
 
 
 @app.delete("/api/collections/{name}/{entity_id}")
-def delete_record(name: str, entity_id: str) -> dict[str, Any]:
+def delete_record(name: str, entity_id: str,
+                  _: User | None = Depends(writer)) -> dict[str, Any]:
     """Delete a record, taking its own children but never a record in use."""
     model, _ = state.require()
     try:

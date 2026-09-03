@@ -583,3 +583,277 @@ def project_summary(model: ProjectModel, params: ParameterSet) -> dict[str, Any]
         "rate_per_sqft": s.rate_per_sqft,
         "derivation": _derivation(s.derivation) if s.derivation else None,
     }
+
+
+# --------------------------------------------------------------------------
+# The project dashboard, and the copy that leaves the building
+# --------------------------------------------------------------------------
+
+def project_card(model: ProjectModel, params: ParameterSet) -> dict[str, Any]:
+    """Enough of a project's shape to choose between them on a dashboard."""
+    from qs_engine.rules.cost_lines import compute_cost_lines, total_cost
+
+    report = validate(model, params)
+    return {
+        "floors": len(model.floors),
+        "unit_types": len(model.unit_types),
+        "rooms": len(model.unit_type_rooms),
+        "units": sum(model.unit_count(u.id) for u in model.unit_types
+                     if not u.is_common_area),
+        "cost_lines": len(model.cost_lines),
+        "cost_total": total_cost(compute_cost_lines(model, params)),
+        "health": round(report.health_score()),
+        "blocking": len(report.blocking),
+        "can_issue": report.can_issue,
+    }
+
+
+def duplicate(model: ProjectModel, name: str) -> ProjectModel:
+    """Copy a project so the two can never share a row.
+
+    Every id is rewritten, and every reference is repointed at the new one, so
+    editing the copy cannot reach back into the original. A shallow copy would
+    look right on screen and quietly write through.
+    """
+    import copy
+    import dataclasses
+    import re
+    import uuid
+
+    from qs_engine import model as M
+
+    fresh = copy.deepcopy(model)
+    suffix = uuid.uuid4().hex[:6]
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "project"
+    new_project_id = f"{slug}-{suffix}"
+
+    # Old id -> new id, for every record in the model.
+    mapping: dict[str, str] = {model.project.id: new_project_id}
+    collections = [f.name for f in dataclasses.fields(fresh)
+                   if f.name != "project"]
+    for attr in collections:
+        for item in getattr(fresh, attr):
+            if getattr(item, "id", None):
+                mapping[item.id] = f"{item.id}-{suffix}"
+
+    def repoint(item) -> None:
+        for field in dataclasses.fields(item):
+            value = getattr(item, field.name)
+            if isinstance(value, str) and value in mapping:
+                setattr(item, field.name, mapping[value])
+
+    fresh.project = M.Project(id=new_project_id, code=name[:24], name=name,
+                              city=model.project.city, client=model.project.client)
+    for attr in collections:
+        for item in getattr(fresh, attr):
+            repoint(item)
+    return fresh
+
+
+#: The sheets the export carries, in the order a reader opens them.
+EXPORT_SHEETS = ("Summary", "Cost Lines", "Take-off", "Rate Library",
+                 "Rooms", "Openings", "Parameters", "Reconciliation")
+
+
+def export_workbook(model: ProjectModel, params: ParameterSet) -> bytes:
+    """The estimate as a workbook.
+
+    Written with formulas rather than values wherever a figure is derived, so a
+    reader can see how it was reached and check it in Excel. That is the
+    opposite of what this platform replaced -- but an exported file is read by
+    people who do not have the platform, and a number they cannot check is a
+    number they cannot trust.
+    """
+    import io
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    from qs_engine.rules.cost_lines import compute_cost_lines
+    from qs_engine.rules.summary import project_summary
+    from qs_engine.rules.takeoff import by_finish, compute_takeoff
+
+    head = Font(bold=True, color="FFFFFF")
+    head_fill = PatternFill("solid", fgColor="1F3864")
+    money = '#,##0.00'
+    title = Font(bold=True, size=12)
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    def sheet(name: str, columns: list[tuple[str, int]]):
+        ws = wb.create_sheet(name[:31])
+        for i, (label, width) in enumerate(columns, start=1):
+            cell = ws.cell(1, i, label)
+            cell.font, cell.fill = head, head_fill
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+            ws.column_dimensions[get_column_letter(i)].width = width
+        ws.freeze_panes = "A2"
+        return ws
+
+    # -- Summary -----------------------------------------------------------
+    summary = project_summary(model, params, params["construction_area_sqft"])
+    ws = sheet("Summary", [("Section", 30), ("Lines", 10), ("Quantities", 16),
+                           ("Amount", 20)])
+    ws.cell(1, 1).value = "Section"
+    row = 2
+    first = row
+    for section in summary.sections:
+        ws.cell(row, 1, section.name)
+        ws.cell(row, 2, section.lines)
+        ws.cell(row, 3, "carried" if section.is_carried else "derived here")
+        ws.cell(row, 4, section.amount).number_format = money
+        row += 1
+    last = row - 1
+
+    ws.cell(row, 1, "Subtotal").font = title
+    ws.cell(row, 4, f"=SUM(D{first}:D{last})").number_format = money
+    subtotal_row = row
+    row += 1
+    for uplift in summary.uplifts:
+        ws.cell(row, 1, f"{uplift.label} @ {uplift.rate:.0%}")
+        ws.cell(row, 4, f"=D{subtotal_row}*{uplift.rate}").number_format = money
+        row += 1
+    ws.cell(row, 1, "Before tax").font = title
+    ws.cell(row, 4, f"=SUM(D{subtotal_row}:D{row - 1})").number_format = money
+    before_tax = row
+    row += 1
+    gst = params["gst_pct"]
+    ws.cell(row, 1, f"GST @ {gst:.0%}")
+    ws.cell(row, 4, f"=D{before_tax}*{gst}").number_format = money
+    row += 1
+    ws.cell(row, 1, "Project total").font = title
+    ws.cell(row, 4, f"=D{before_tax}+D{row - 1}").number_format = money
+    ws.cell(row, 4).font = title
+    row += 2
+    ws.cell(row, 1, "Exported from the DBOT QS Platform. Section totals are "
+                    "filters over the lines that belong to them, so a band "
+                    "cannot outgrow the range that sums it.")
+
+    # -- Cost lines --------------------------------------------------------
+    ws = sheet("Cost Lines", [("Section", 24), ("Description", 44), ("Unit", 8),
+                              ("Quantity", 14), ("Rate", 14), ("Amount", 18),
+                              ("From", 26)])
+    sections = {s.id: s.name for s in model.cost_sections}
+    row = 2
+    for line in compute_cost_lines(model, params):
+        if line.is_heading:
+            ws.cell(row, 2, line.description).font = Font(bold=True)
+            row += 1
+            continue
+        ws.cell(row, 1, sections.get(line.line.section_id, ""))
+        ws.cell(row, 2, line.description)
+        ws.cell(row, 3, line.unit)
+        ws.cell(row, 4, line.qty)
+        ws.cell(row, 5, line.rate)
+        ws.cell(row, 6, f"=D{row}*E{row}").number_format = money
+        ws.cell(row, 7, line.line.source_ref)
+        row += 1
+
+    # -- Take-off ----------------------------------------------------------
+    lines = compute_takeoff(model, params)
+    ws = sheet("Take-off", [("Unit type", 18), ("Room", 24), ("Finish", 24),
+                            ("Rule", 16), ("Gross", 12), ("Deduction", 12),
+                            ("Net", 12), ("Unit", 8), ("Units", 8),
+                            ("Total qty", 14), ("Rate", 12), ("Amount", 16)])
+    row = 2
+    for line in lines:
+        ws.cell(row, 1, line.unit_type_code)
+        ws.cell(row, 2, line.room_label)
+        ws.cell(row, 3, line.finish_name)
+        ws.cell(row, 4, line.qty_rule)
+        ws.cell(row, 5, line.gross)
+        ws.cell(row, 6, line.deduction)
+        ws.cell(row, 7, f"=E{row}-F{row}")
+        ws.cell(row, 8, line.unit)
+        ws.cell(row, 9, line.unit_count)
+        ws.cell(row, 10, f"=G{row}*I{row}")
+        ws.cell(row, 11, line.rate)
+        ws.cell(row, 12, f"=J{row}*K{row}").number_format = money
+        row += 1
+
+    ws = sheet("Take-off by finish", [("Finish", 28), ("Quantity", 14),
+                                      ("Unit", 8), ("Sq ft", 14),
+                                      ("Amount", 18)])
+    row = 2
+    for group in by_finish(lines, params):
+        ws.cell(row, 1, group.label)
+        ws.cell(row, 2, group.quantity)
+        ws.cell(row, 3, group.unit)
+        ws.cell(row, 4, group.quantity_sqft)
+        ws.cell(row, 5, group.amount).number_format = money
+        row += 1
+
+    # -- Rate library ------------------------------------------------------
+    ws = sheet("Rate Library", [("Code", 16), ("Description", 34),
+                                ("Specification", 30), ("Unit", 8),
+                                ("Method", 20), ("Basic", 12), ("Laying", 12),
+                                ("Wastage", 10), ("Overall rate", 14)])
+    row = 2
+    for item in model.rate_items:
+        revision = model.current_revision(item.id)
+        ws.cell(row, 1, item.code)
+        ws.cell(row, 2, item.description)
+        ws.cell(row, 3, item.specification)
+        ws.cell(row, 4, item.unit)
+        ws.cell(row, 5, revision.method.value if revision else "")
+        ws.cell(row, 6, revision.basic_rate if revision else None)
+        ws.cell(row, 7, revision.laying_rate if revision else None)
+        ws.cell(row, 8, revision.wastage_pct if revision else None)
+        try:
+            ws.cell(row, 9, effective_rate(item, model, params).value)
+        except RateBuildupError:
+            ws.cell(row, 9, None)
+        row += 1
+
+    # -- Rooms -------------------------------------------------------------
+    ws = sheet("Rooms", [("Unit type", 18), ("Room", 26), ("Room type", 24),
+                         ("Nos", 8), ("Area sq.m", 12), ("Perimeter m", 12),
+                         ("Area sq.ft", 14)])
+    factor = params["factor_sqm_to_sqft"]
+    row = 2
+    for unit in sorted(model.unit_types, key=lambda u: u.seq):
+        for room in model.rooms_of(unit.id):
+            ws.cell(row, 1, unit.code)
+            ws.cell(row, 2, room.label)
+            ws.cell(row, 3, model.room_type(room.room_type_id).name)
+            ws.cell(row, 4, room.count_per_unit)
+            ws.cell(row, 5, room.carpet_area_sqm)
+            ws.cell(row, 6, room.perimeter_m)
+            ws.cell(row, 7, f"=E{row}*{factor}")
+            row += 1
+
+    # -- Openings ----------------------------------------------------------
+    from qs_engine.rules.schedule import priced_opening_schedule
+    ws = sheet("Openings", [("Code", 14), ("Kind", 14), ("Width m", 10),
+                            ("Height m", 10), ("Count", 10), ("Quantity", 14),
+                            ("Unit", 8), ("Rate", 14), ("Amount", 18)])
+    row = 2
+    for line in priced_opening_schedule(model, params):
+        ws.cell(row, 1, line.code)
+        ws.cell(row, 2, line.kind.value)
+        ws.cell(row, 3, line.width_m)
+        ws.cell(row, 4, line.height_m)
+        ws.cell(row, 5, line.count)
+        ws.cell(row, 6, line.quantity)
+        ws.cell(row, 7, line.unit)
+        ws.cell(row, 8, line.rate)
+        ws.cell(row, 9, line.amount).number_format = money
+        row += 1
+
+    # -- Parameters --------------------------------------------------------
+    ws = sheet("Parameters", [("Key", 26), ("Value", 14), ("Unit", 12),
+                              ("What it is", 60), ("From", 40)])
+    row = 2
+    for parameter in params:
+        ws.cell(row, 1, parameter.key)
+        ws.cell(row, 2, parameter.value)
+        ws.cell(row, 3, parameter.unit)
+        ws.cell(row, 4, parameter.description or "— not yet described —")
+        ws.cell(row, 5, parameter.source)
+        row += 1
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()

@@ -155,7 +155,7 @@ window.addEventListener('hashchange', render);
 const SCREENS = [
   'overview', 'room-config', 'unit-types', 'openings', 'rates', 'mapping',
   'takeoff', 'finish-totals', 'cost-lines', 'summary', 'parameters',
-  'validation', 'reconciliation', 'audit',
+  'validation', 'reconciliation', 'audit', 'login', 'projects',
 ];
 
 // Which build is on screen.
@@ -164,6 +164,38 @@ const SCREENS = [
 // current code -- before that, a browser could reuse an old `app.js` for hours
 // and a pulled change simply would not appear. This stamp makes that visible
 // rather than something to be trusted.
+async function showWho() {
+  try {
+    const me = await api.get('/me');
+    const el = document.getElementById('whoami');
+    if (!el) return;
+    if (me.open_access) {
+      el.innerHTML = `<a href="#/login" class="chip warn"
+        title="No accounts exist, so anyone who can reach this can change it.
+Every change is logged as “local” until somebody signs in."
+        style="text-decoration:none">no accounts — set one up</a>`;
+    } else if (me.signed_in) {
+      el.innerHTML = `<span class="chip mute" title="${escapeAttr(me.user.email)}"
+        >${escapeAttr(me.user.name)} · ${escapeAttr(me.user.role)}</span>
+        <a href="#" id="signout" class="link-quiet" style="margin-left:6px">sign out</a>`;
+      const out = document.getElementById('signout');
+      if (out) out.onclick = async (e) => {
+        e.preventDefault();
+        await api.post('/logout');
+        location.hash = '#/login';
+        location.reload();
+      };
+    } else {
+      el.innerHTML = '<a href="#/login" class="chip" style="text-decoration:none">sign in</a>';
+    }
+  } catch { /* never block the app on this */ }
+}
+
+function escapeAttr(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 async function showBuild() {
   try {
     const v = await api.get('/version');
@@ -177,6 +209,7 @@ async function showBuild() {
 (async function boot() {
   await Promise.all(SCREENS.map(name => import(`./screens/${name}.js`)));
   showBuild();
+  showWho();
   try {
     setHeadline(await api.get('/headline'));
   } catch (err) {

@@ -16,6 +16,7 @@ Two rules the schema enforces:
 
 from __future__ import annotations
 
+import contextvars
 import dataclasses
 import sqlite3
 import typing
@@ -51,6 +52,15 @@ TABLES: tuple[tuple[str, type, str | None], ...] = (
 #: Added to every table so a whole project loads with one WHERE clause. Named
 #: distinctly because several entities carry their own ``project_id`` field.
 OWNER = "_owner_project"
+
+#: Who is making the change now.
+#:
+#: Every audit row said "local" until accounts existed. The actor belongs to
+#: the request rather than to any one call, so it travels here instead of
+#: growing an argument on fifteen call sites -- and a background task that sets
+#: nothing still records something truthful.
+current_actor: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_actor", default="local")
 
 
 def _hints(cls: type) -> dict[str, Any]:
@@ -108,6 +118,11 @@ def _columns(cls: type) -> list[str]:
     return [f.name for f in dataclasses.fields(cls)]
 
 
+def _now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 class Store:
     """Reads and writes whole projects.
 
@@ -153,6 +168,30 @@ class Store:
             f'"{OWNER}" TEXT NOT NULL, "key" TEXT NOT NULL, "value" REAL NOT NULL, '
             f'"unit" TEXT, "description" TEXT, "source" TEXT, '
             f'PRIMARY KEY ("{OWNER}", "key"))'
+        )
+        # Users and sessions live outside the per-project tables: they are not
+        # part of a project revision and must survive one being replaced.
+        cur.execute(
+            'CREATE TABLE IF NOT EXISTS "app_user" ('
+            '"id" TEXT PRIMARY KEY, "email" TEXT NOT NULL UNIQUE, '
+            '"name" TEXT NOT NULL, "role" TEXT NOT NULL, '
+            '"password_hash" TEXT NOT NULL, "is_active" INTEGER NOT NULL DEFAULT 1, '
+            '"created_at" TEXT NOT NULL)'
+        )
+        cur.execute(
+            'CREATE TABLE IF NOT EXISTS "app_session" ('
+            '"token" TEXT PRIMARY KEY, "user_id" TEXT NOT NULL, '
+            '"created_at" TEXT NOT NULL, "expires_at" TEXT NOT NULL)'
+        )
+        cur.execute('CREATE INDEX IF NOT EXISTS "ix_session_user" '
+                    'ON "app_session" ("user_id")')
+        # Project metadata the dashboard needs and a ProjectModel does not
+        # carry -- when it was touched, and whether it is still live.
+        cur.execute(
+            'CREATE TABLE IF NOT EXISTS "project_meta" ('
+            '"project_id" TEXT PRIMARY KEY, "created_at" TEXT, '
+            '"updated_at" TEXT, "archived" INTEGER NOT NULL DEFAULT 0, '
+            '"created_by" TEXT)'
         )
         cur.execute(
             'CREATE TABLE IF NOT EXISTS "audit_log" ('
@@ -210,6 +249,12 @@ class Store:
                     [(owner, p.key, p.value, p.unit, p.description, p.source)
                      for p in params],
                 )
+            now = _now()
+            cur.execute(
+                'INSERT INTO "project_meta" ("project_id", "created_at", '
+                '"updated_at") VALUES (?, ?, ?) '
+                'ON CONFLICT("project_id") DO UPDATE SET "updated_at" = ?',
+                (owner, now, now, now))
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -260,10 +305,104 @@ class Store:
         )
         self._conn.commit()
 
+    # -- users and sessions -------------------------------------------------
+
+    def create_user(self, user_id: str, email: str, name: str, role: str,
+                    password_hash: str) -> dict[str, Any]:
+        self._conn.execute(
+            'INSERT INTO "app_user" ("id", "email", "name", "role", '
+            '"password_hash", "is_active", "created_at") VALUES (?, ?, ?, ?, ?, 1, ?)',
+            (user_id, email.strip().lower(), name, role, password_hash, _now()))
+        self._conn.commit()
+        return self.user_by_email(email)
+
+    def user_by_email(self, email: str) -> dict[str, Any] | None:
+        row = self._conn.execute('SELECT * FROM "app_user" WHERE "email" = ?',
+                                 (email.strip().lower(),)).fetchone()
+        return dict(row) if row else None
+
+    def user_by_id(self, user_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute('SELECT * FROM "app_user" WHERE "id" = ?',
+                                 (user_id,)).fetchone()
+        return dict(row) if row else None
+
+    def users(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            'SELECT "id", "email", "name", "role", "is_active", "created_at" '
+            'FROM "app_user" ORDER BY "name"').fetchall()
+        return [dict(r) for r in rows]
+
+    def user_count(self) -> int:
+        return self._conn.execute(
+            'SELECT COUNT(*) AS n FROM "app_user"').fetchone()["n"]
+
+    def set_user_active(self, user_id: str, active: bool) -> None:
+        self._conn.execute('UPDATE "app_user" SET "is_active" = ? WHERE "id" = ?',
+                           (1 if active else 0, user_id))
+        self._conn.commit()
+
+    def start_session(self, token: str, user_id: str, expires_at: str) -> None:
+        self._conn.execute(
+            'INSERT INTO "app_session" ("token", "user_id", "created_at", '
+            '"expires_at") VALUES (?, ?, ?, ?)',
+            (token, user_id, _now(), expires_at))
+        self._conn.commit()
+
+    def session(self, token: str) -> dict[str, Any] | None:
+        row = self._conn.execute('SELECT * FROM "app_session" WHERE "token" = ?',
+                                 (token,)).fetchone()
+        return dict(row) if row else None
+
+    def end_session(self, token: str) -> None:
+        self._conn.execute('DELETE FROM "app_session" WHERE "token" = ?', (token,))
+        self._conn.commit()
+
+    def purge_expired_sessions(self, now: str) -> int:
+        cur = self._conn.execute('DELETE FROM "app_session" WHERE "expires_at" <= ?',
+                                 (now,))
+        self._conn.commit()
+        return cur.rowcount
+
+    # -- project metadata ---------------------------------------------------
+
+    def project_meta(self, project_id: str) -> dict[str, Any]:
+        row = self._conn.execute(
+            'SELECT * FROM "project_meta" WHERE "project_id" = ?',
+            (project_id,)).fetchone()
+        return dict(row) if row else {"project_id": project_id, "created_at": None,
+                                      "updated_at": None, "archived": 0,
+                                      "created_by": None}
+
+    def set_archived(self, project_id: str, archived: bool) -> None:
+        self._conn.execute(
+            'INSERT INTO "project_meta" ("project_id", "archived", "updated_at") '
+            'VALUES (?, ?, ?) ON CONFLICT("project_id") DO UPDATE SET '
+            '"archived" = ?, "updated_at" = ?',
+            (project_id, int(archived), _now(), int(archived), _now()))
+        self._conn.commit()
+
+    def delete_project(self, project_id: str) -> None:
+        """Remove a project and every row that belongs to it."""
+        cur = self._conn.cursor()
+        try:
+            cur.execute("BEGIN")
+            for table, _, _ in TABLES:
+                cur.execute(f'DELETE FROM "{table}" WHERE "{OWNER}" = ?',
+                            (project_id,))
+            cur.execute(f'DELETE FROM "project_parameter" WHERE "{OWNER}" = ?',
+                        (project_id,))
+            cur.execute('DELETE FROM "project_meta" WHERE "project_id" = ?',
+                        (project_id,))
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+
     # -- audit -------------------------------------------------------------
 
     def log(self, project_id: str, entity: str, entity_id: str, field: str,
-            old: Any, new: Any, *, actor: str = "local", reason: str = "") -> None:
+            old: Any, new: Any, *, actor: str | None = None,
+            reason: str = "") -> None:
         """Record a change.
 
         The workbook has no equivalent: two shuttering rates sit one sheet apart
@@ -276,7 +415,7 @@ class Store:
             '"entity_id", "field", "old_value", "new_value", "reason") '
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (datetime.now(timezone.utc).isoformat(timespec="seconds"), project_id,
-             actor, entity, entity_id, field,
+             actor or current_actor.get(), entity, entity_id, field,
              None if old is None else str(old),
              None if new is None else str(new), reason),
         )

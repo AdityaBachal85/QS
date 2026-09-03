@@ -19,10 +19,12 @@
     </div>
     <div class="headline" id="headline"></div>
     <div class="health" id="healthChip"></div>
+    <div class="build" id="whoami"></div>
     <div class="build" id="buildStamp" title="The build you are looking at"></div>
   </header>
 
   <nav id="sidebar">
+    <a href="#/projects"       data-nav>Projects</a>
     <a href="#/overview"       data-nav>Overview</a>
     <div class="nav-group">Inputs</div>
     <a href="#/room-config"    data-nav>Room Config</a>
@@ -40,6 +42,8 @@
     <a href="#/validation"     data-nav>Validation</a>
     <a href="#/reconciliation" data-nav>Reconciliation</a>
     <a href="#/audit"          data-nav>Change log</a>
+    <div class="nav-group">Out</div>
+    <a href="/api/export.xlsx" download>Export to Excel</a>
     <div class="legend">
       <div><span class="swatch input"></span> you enter this</div>
       <div><span class="swatch derived"></span> the system computes it</div>
