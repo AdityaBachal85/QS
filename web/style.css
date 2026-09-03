@@ -321,3 +321,28 @@ td.editing select {
 /* A screen that asks the user to decide something explains itself first. */
 .explainer { border-left: 3px solid var(--accent, #1E40AF); }
 .explainer .card-body p { max-width: 78ch; line-height: 1.55; }
+
+/* --- Range selection ----------------------------------------------------
+   A QS works in blocks, so the grid shows one. Selected cells get a tint and
+   the focused cell keeps its own outline, so "where am I" and "what is
+   selected" stay two different questions. */
+.grid td.in-range { background: var(--accent-soft); }
+.grid td.in-range.derived { background: color-mix(in srgb, var(--accent-soft) 70%, transparent); }
+.grid td:focus { outline: 2px solid var(--accent); outline-offset: -2px; position: relative; z-index: 3; }
+
+.grid-status {
+  padding: 5px 10px; font-size: 11px; color: var(--ink-3);
+  border-top: 1px solid var(--line); background: var(--surface);
+}
+
+/* The shortcuts, where they are needed rather than in a manual. */
+.grid-help {
+  display: flex; flex-wrap: wrap; gap: 4px 14px;
+  padding: 7px 10px; font-size: 11px; color: var(--ink-3);
+  border-top: 1px solid var(--line);
+}
+.grid-help kbd {
+  font-family: var(--mono); font-size: 10.5px; background: var(--surface);
+  border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px;
+  padding: 1px 4px; color: var(--ink-2);
+}

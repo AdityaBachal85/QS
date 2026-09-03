@@ -21,6 +21,14 @@ import { escapeHtml } from './panel.js';
 let undoStack = [];
 export function clearUndo() { undoStack = []; }
 
+//: Where the cursor was when a write triggered a redraw.
+//
+// Committing reloads the screen, which rebuilds the table -- and focus died
+// with the old DOM, so the next keystroke went nowhere. Ctrl+Z after a fill
+// did nothing at all, which is exactly the kind of silence this app exists to
+// remove. The first grid that can honour it takes it, and clears it.
+let pendingFocus = null;
+
 export function createGrid(host, config) {
   const {
     columns, rows, rowKey = r => r.id,
@@ -275,7 +283,158 @@ export function createGrid(host, config) {
     }
   }
 
+  // -- selection ----------------------------------------------------------
+  //
+  // A QS works in blocks: a column of areas, a row of counts. Without a range
+  // there is no copy, no fill and no paste-into-a-selection, and the grid stops
+  // being a place you can do the work.
+
+  let selection = null;          // {ar, ac, fr, fc} anchor and focus
+
+  function bounds(sel) {
+    return {
+      r0: Math.min(sel.ar, sel.fr), r1: Math.max(sel.ar, sel.fr),
+      c0: Math.min(sel.ac, sel.fc), c1: Math.max(sel.ac, sel.fc),
+    };
+  }
+
+  function paint() {
+    tbody.querySelectorAll('td.in-range').forEach(td => td.classList.remove('in-range'));
+    if (!selection) { announce(''); return; }
+    const b = bounds(selection);
+    let n = 0;
+    for (let r = b.r0; r <= b.r1; r++) {
+      for (let c = b.c0; c <= b.c1; c++) {
+        const td = cellAt(r, c);
+        if (td) { td.classList.add('in-range'); n++; }
+      }
+    }
+    announce(n > 1 ? `${n} cells selected` : '');
+  }
+
+  function announce(text) {
+    let el = wrap.querySelector('.grid-status');
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'grid-status';
+      el.setAttribute('aria-live', 'polite');
+      wrap.appendChild(el);
+    }
+    el.textContent = text;
+    el.hidden = !text;
+  }
+
+  function cellAt(r, c) {
+    return tbody.querySelector(`td[data-r="${r}"][data-c="${c}"]`);
+  }
+
+  function setAnchor(td) {
+    selection = { ar: Number(td.dataset.r), ac: Number(td.dataset.c),
+                  fr: Number(td.dataset.r), fc: Number(td.dataset.c) };
+    paint();
+  }
+
+  function extendTo(r, c) {
+    if (!selection) return;
+    selection.fr = Math.max(0, Math.min(rows.length - 1, r));
+    selection.fc = Math.max(0, Math.min(columns.length - 1, c));
+    const td = cellAt(selection.fr, selection.fc);
+    if (td) td.focus({ preventScroll: false });
+    paint();
+  }
+
+  /** What a cell copies as: the raw number for inputs, what you see for the rest. */
+  function copyText(row, col) {
+    const v = valueOf(row, col);
+    if (col.kind === 'input') return v === null || v === undefined ? '' : String(v);
+    if (col.kind === 'select') {
+      const opt = (col.options || []).find(o => String(o.value) === String(v));
+      return opt ? opt.label : (v ?? '');
+    }
+    const td = document.createElement('div');
+    td.innerHTML = display(row, col);
+    return td.textContent.replace(/\u2014/g, '').trim();
+  }
+
+  async function copySelection() {
+    if (!selection) return;
+    const b = bounds(selection);
+    const lines = [];
+    for (let r = b.r0; r <= b.r1; r++) {
+      const line = [];
+      for (let c = b.c0; c <= b.c1; c++) line.push(copyText(rows[r], columns[c]));
+      lines.push(line.join('\t'));
+    }
+    const text = lines.join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Clipboard permission refused -- fall back to a hidden textarea.
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } finally { ta.remove(); }
+    }
+    const n = (b.r1 - b.r0 + 1) * (b.c1 - b.c0 + 1);
+    toast(`Copied ${n} cell${n === 1 ? '' : 's'} — paste straight into Excel`);
+  }
+
+  /** Ctrl+D / Ctrl+R: repeat the first row (or column) across the selection. */
+  async function fill(direction) {
+    if (!selection) return;
+    const b = bounds(selection);
+    const edits = [];
+    for (let r = b.r0; r <= b.r1; r++) {
+      for (let c = b.c0; c <= b.c1; c++) {
+        if (direction === 'down' && r === b.r0) continue;
+        if (direction === 'right' && c === b.c0) continue;
+        const col = columns[c];
+        if (col.kind !== 'input') continue;
+        const source = direction === 'down' ? valueOf(rows[b.r0], col)
+                                            : valueOf(rows[r], columns[b.c0]);
+        const before = valueOf(rows[r], col);
+        if (source === before) continue;
+        edits.push({ row: rows[r], col, value: source, before });
+      }
+    }
+    await commitMany(edits, `Filled ${direction}`);
+  }
+
+  /** One undo entry for the whole block, so a fill or paste reverses in one go. */
+  async function commitMany(edits, what) {
+    if (!edits.length) { toast('Nothing editable in that selection', true); return; }
+    rememberFocus();
+    undoStack.push(...edits.map(e => ({ row: e.row, col: e.col, value: e.before })).reverse());
+    for (const edit of edits) {
+      try { await onCommit(edit.row, edit.col, edit.value); }
+      catch (err) { toast(err.message, true); break; }
+    }
+    if (config.reload) await config.reload();
+    toast(`${what}: ${edits.length} cell${edits.length === 1 ? '' : 's'}`);
+  }
+
   // -- events -------------------------------------------------------------
+
+  tbody.addEventListener('mousedown', e => {
+    const td = e.target.closest('td');
+    if (!td || editing || e.target.closest('.row-del')) return;
+    if (e.shiftKey && selection) {
+      e.preventDefault();
+      extendTo(Number(td.dataset.r), Number(td.dataset.c));
+      return;
+    }
+    setAnchor(td);
+    dragging = true;
+  });
+
+  // Click-drag to select, the way a spreadsheet does.
+  let dragging = false;
+  tbody.addEventListener('mouseover', e => {
+    if (!dragging || editing) return;
+    const td = e.target.closest('td');
+    if (td) extendTo(Number(td.dataset.r), Number(td.dataset.c));
+  });
+  document.addEventListener('mouseup', () => { dragging = false; });
 
   tbody.addEventListener('click', async e => {
     const td = e.target.closest('td');
@@ -298,11 +457,48 @@ export function createGrid(host, config) {
     const col = columns[td.dataset.c];
     const row = rows[td.dataset.r];
 
+    const r = Number(td.dataset.r), c = Number(td.dataset.c);
+    const mod = e.ctrlKey || e.metaKey;
+
+    // Shift+arrows grow the selection; a bare arrow moves and resets it.
+    if (e.shiftKey && e.key.startsWith('Arrow')) {
+      e.preventDefault();
+      if (!selection) setAnchor(td);
+      const d = { ArrowUp: [-1, 0], ArrowDown: [1, 0],
+                  ArrowLeft: [0, -1], ArrowRight: [0, 1] }[e.key];
+      extendTo(selection.fr + d[0], selection.fc + d[1]);
+      return;
+    }
+    if (mod) {
+      switch (e.key.toLowerCase()) {
+        case 'c': e.preventDefault(); copySelection(); return;
+        case 'd': e.preventDefault(); fill('down'); return;
+        case 'r': e.preventDefault(); fill('right'); return;
+        case 'a':
+          e.preventDefault();
+          selection = { ar: 0, ac: 0, fr: rows.length - 1, fc: columns.length - 1 };
+          paint();
+          return;
+        case 'home': {
+          e.preventDefault();
+          const first = cellAt(0, 0); if (first) { first.focus(); setAnchor(first); }
+          return;
+        }
+        case 'end': {
+          e.preventDefault();
+          const last = cellAt(rows.length - 1, columns.length - 1);
+          if (last) { last.focus(); setAnchor(last); }
+          return;
+        }
+      }
+    }
+
     switch (e.key) {
-      case 'ArrowUp':    e.preventDefault(); move(td, -1, 0); return;
-      case 'ArrowDown':  e.preventDefault(); move(td, 1, 0);  return;
-      case 'ArrowLeft':  e.preventDefault(); move(td, 0, -1); return;
-      case 'ArrowRight': e.preventDefault(); move(td, 0, 1);  return;
+      case 'Escape':     selection = null; paint(); return;
+      case 'ArrowUp':    e.preventDefault(); setAnchor(td); move(td, -1, 0); return;
+      case 'ArrowDown':  e.preventDefault(); setAnchor(td); move(td, 1, 0);  return;
+      case 'ArrowLeft':  e.preventDefault(); setAnchor(td); move(td, 0, -1); return;
+      case 'ArrowRight': e.preventDefault(); setAnchor(td); move(td, 0, 1);  return;
       case 'Tab': {
         const next = nextEditable(td, e.shiftKey ? -1 : 1);
         if (next) { e.preventDefault(); next.focus(); }
@@ -314,13 +510,23 @@ export function createGrid(host, config) {
         else if (col.kind === 'derived' && onDerivedClick) onDerivedClick(row, col, td);
         return;
       case 'Delete':
-      case 'Backspace':
-        if (col.kind === 'input') {
-          e.preventDefault();
-          undoStack.push({ row, col, value: valueOf(row, col) });
-          apply(row, col, col.nullable ? null : 0, td);
+      case 'Backspace': {
+        e.preventDefault();
+        const b = selection ? bounds(selection) : { r0: r, r1: r, c0: c, c1: c };
+        const edits = [];
+        for (let rr = b.r0; rr <= b.r1; rr++) {
+          for (let cc = b.c0; cc <= b.c1; cc++) {
+            const cl = columns[cc];
+            if (cl.kind !== 'input') continue;
+            const before = valueOf(rows[rr], cl);
+            const blank = cl.nullable ? null : 0;
+            if (before === blank) continue;
+            edits.push({ row: rows[rr], col: cl, value: blank, before });
+          }
         }
+        if (edits.length) commitMany(edits, 'Cleared');
         return;
+      }
     }
 
     if (e.key === 'z' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); undo(); return; }
@@ -343,32 +549,62 @@ export function createGrid(host, config) {
 
     const r0 = Number(td.dataset.r), c0 = Number(td.dataset.c);
     const edits = [];
-    block.forEach((line, dr) => line.forEach((cellText, dc) => {
-      const row = rows[r0 + dr], col = columns[c0 + dc];
-      if (!row || !col || col.kind !== 'input') return;
-      edits.push({ row, col, value: parse(cellText, col), before: valueOf(row, col) });
-    }));
+    const single = block.length === 1 && block[0].length === 1;
 
-    if (!edits.length) { toast('Nothing in the clipboard landed on an editable cell', true); return; }
-    undoStack.push(...edits.map(x => ({ row: x.row, col: x.col, value: x.before })).reverse());
-
-    for (const edit of edits) {
-      try { await onCommit(edit.row, edit.col, edit.value); }
-      catch (err) { toast(err.message, true); break; }
+    if (single && selection && (selection.ar !== selection.fr || selection.ac !== selection.fc)) {
+      // One value pasted over a range fills it, as Excel does.
+      const b = bounds(selection);
+      for (let r = b.r0; r <= b.r1; r++) {
+        for (let c = b.c0; c <= b.c1; c++) {
+          const col = columns[c];
+          if (col.kind !== 'input') continue;
+          edits.push({ row: rows[r], col, value: parse(block[0][0], col),
+                       before: valueOf(rows[r], col) });
+        }
+      }
+    } else {
+      block.forEach((line, dr) => line.forEach((cellText, dc) => {
+        const row = rows[r0 + dr], col = columns[c0 + dc];
+        if (!row || !col || col.kind !== 'input') return;
+        edits.push({ row, col, value: parse(cellText, col), before: valueOf(row, col) });
+      }));
     }
-    if (config.reload) await config.reload();
-    toast(`Pasted ${edits.length} cell${edits.length === 1 ? '' : 's'}`);
+
+    if (!edits.length) {
+      toast('Nothing in the clipboard landed on an editable cell', true);
+      return;
+    }
+    await commitMany(edits, 'Pasted');
   });
 
   async function undo() {
     const last = undoStack.pop();
     if (!last) { toast('Nothing to undo'); return; }
+    rememberFocus();
     try {
       await onCommit(last.row, last.col, last.value);
       if (config.reload) await config.reload();
       toast('Undone');
     } catch (err) { toast(err.message, true); }
   }
+
+  function rememberFocus() {
+    const td = tbody.querySelector('td:focus') ||
+      (selection ? cellAt(selection.fr, selection.fc) : null);
+    if (td) pendingFocus = { r: Number(td.dataset.r), c: Number(td.dataset.c) };
+  }
+
+  function restoreFocus() {
+    if (!pendingFocus) return;
+    const td = cellAt(pendingFocus.r, pendingFocus.c);
+    if (!td) return;                      // a different grid on the same screen
+    pendingFocus = null;
+    td.focus({ preventScroll: true });
+    setAnchor(td);
+  }
+
+  // Repainting after a redraw, so a selection survives a reload.
+  const drawAndPaint = () => { draw(); paint(); };
 
   async function removeRow(row) {
     if (!config.onDelete) return;
@@ -402,6 +638,23 @@ export function createGrid(host, config) {
   draw();
   wrap.appendChild(table);
   host.appendChild(wrap);
+  restoreFocus();
+
+  // The shortcuts live under the grid they belong to. A spreadsheet's
+  // keyboard is muscle memory; this says which of it works here.
+  if (columns.some(c => c.kind === 'input') && config.shortcuts !== false) {
+    const help = document.createElement('div');
+    help.className = 'grid-help';
+    help.innerHTML = [
+      ['Select a block', 'drag, or <kbd>Shift</kbd>+arrows'],
+      ['Copy to Excel', '<kbd>Ctrl</kbd>+<kbd>C</kbd>'],
+      ['Paste from Excel', '<kbd>Ctrl</kbd>+<kbd>V</kbd>'],
+      ['Fill down / right', '<kbd>Ctrl</kbd>+<kbd>D</kbd> / <kbd>Ctrl</kbd>+<kbd>R</kbd>'],
+      ['Clear', '<kbd>Delete</kbd>'],
+      ['Undo', '<kbd>Ctrl</kbd>+<kbd>Z</kbd>'],
+    ].map(([what, keys]) => `<span>${what} ${keys}</span>`).join('');
+    host.appendChild(help);
+  }
 
   if (config.onAdd) {
     const bar = document.createElement('div');
@@ -412,5 +665,5 @@ export function createGrid(host, config) {
     host.appendChild(bar);
   }
 
-  return { element: wrap, redraw: draw, undo, addRow };
+  return { element: wrap, redraw: drawAndPaint, undo, addRow, copySelection };
 }
