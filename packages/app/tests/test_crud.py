@@ -94,8 +94,42 @@ def test_rename_a_unit_type(project):
 def test_a_derived_value_cannot_be_set_through_crud(project):
     model, _ = project
     room = model.unit_type_rooms[0]
-    with pytest.raises(CrudError, match="not an input"):
+    with pytest.raises(CrudError, match="computed from other values"):
         crud.update(model, "rooms", room.id, {"area_sqft": 999})
+
+
+def test_which_door_is_in_a_room_is_an_input(project):
+    """It was refused as a derived value, which it is not.
+
+    Changing an opening's type came back as "derived values are computed and
+    cannot be set" -- wrong twice: the field is a plain reference, and the
+    refusal blamed a category it does not belong to.
+    """
+    model, _ = project
+    opening = model.room_openings[0]
+    kind = model.opening_type(opening.opening_type_id).kind
+    other = next(o for o in model.opening_types
+                 if o.kind is kind and o.id != opening.opening_type_id)
+
+    crud.update(model, "room-openings", opening.id, {"opening_type_id": other.id})
+    assert opening.opening_type_id == other.id
+
+
+def test_a_refusal_says_which_kind_of_refusal_it_is(project):
+    """A field that is merely not editable must not be called derived."""
+    model, _ = project
+    opening = model.room_openings[0]
+
+    with pytest.raises(CrudError) as derived:
+        crud.update(model, "room-openings", opening.id, {"area_sqft": 1})
+    assert "computed from other values" in str(derived.value)
+
+    with pytest.raises(CrudError) as unknown:
+        crud.update(model, "room-openings", opening.id, {"nonsense": 1})
+    message = str(unknown.value)
+    assert "has no 'nonsense'" in message
+    assert "computed" not in message, "an unknown field is not a derived one"
+    assert "opening_type_id" in message, "the refusal should say what IS editable"
 
 
 # -- deleting -------------------------------------------------------------

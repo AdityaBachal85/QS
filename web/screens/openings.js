@@ -76,9 +76,8 @@ route('/openings', async (main) => {
         title: 'A rate per Nos. prices the count; a rate per sq.m or RM prices the '
              + 'measured quantity. Mixing the two raises rather than multiplying.',
         render: v => `<span class="muted">${v === 'NOS' ? 'count' : 'quantity'}</span>` },
-      { key: 'amount', label: 'Amount', kind: 'derived', width: '134px', total: true,
-        render: (v, row) => (row.status === 'priced' ? fmt.money(v)
-          : `<span class="warn-text" title="${escapeHtml(row.message)}">not counted</span>`) },
+      { key: 'amount', label: 'Amount', kind: 'derived', width: '178px', total: true,
+        render: (v, row) => (row.status === 'priced' ? fmt.money(v) : whyNot(row)) },
     ],
     // Money first; the priced-but-never-measured types fall to the bottom
     // where they read as the gap they are, rather than heading the table.
@@ -89,13 +88,25 @@ route('/openings', async (main) => {
   });
 
   if (costs.unpriced.length) {
+    const bays = costs.unpriced.filter(u => u.code.startsWith('CW '));
+    const rest = costs.unpriced.filter(u => !u.code.startsWith('CW '));
     document.getElementById('costs').insertAdjacentHTML('beforeend', `
       <div class="card-body muted" style="border-top:1px solid var(--line)">
-        <strong>${costs.unpriced.length} type${costs.unpriced.length === 1 ? '' : 's'}
-        carr${costs.unpriced.length === 1 ? 'ies' : 'y'} a rate but reach
-        no total:</strong>
-        ${costs.unpriced.map(u => escapeHtml(u.code)).join(' · ')}.
-        These are priced and unmeasured — work someone costed and nobody counted.
+        <strong>Why some rows show no amount.</strong> These types carry a rate
+        and no measured quantity, so there is nothing to multiply. They are listed
+        rather than hidden, because priced work that nobody measured is a gap worth
+        seeing — not a zero.
+        ${bays.length ? `<p style="margin:8px 0 0">
+          <strong>${bays.length} curtain-wall bays</strong> (${bays.map(u => escapeHtml(u.code.slice(3))).join(', ')})
+          — the workbook multiplies these by 32 (<span class="mono">D&amp;W Schedule!E32</span>)
+          where the building has 4 office floors. That is question <strong>Q-1</strong>,
+          worth ₹2.89 Cr, and still open. Rather than guess a count, they stay
+          measured-at-nothing until it is settled.</p>` : ''}
+        ${rest.length ? `<p style="margin:8px 0 0">
+          <strong>${rest.map(u => escapeHtml(u.code)).join(', ')}</strong>
+          — in the schedule with a rate, but not placed in any room. The workbook's
+          own window summary (<span class="mono">Windows!D166:D177</span>) leaves
+          ${rest.length === 1 ? 'it' : 'them'} out too.</p>` : ''}
       </div>`);
   }
 
@@ -137,3 +148,15 @@ route('/openings', async (main) => {
     if (host) createGrid(host, { columns: scheduleColumns, rows, emptyMessage: 'None scheduled.' });
   }
 });
+
+
+// Why a line reaches no amount, said in the cell rather than on hover.
+// Meaning never rides on colour alone.
+function whyNot(row) {
+  const reason = row.status === 'no_quantity'
+    ? (row.code.startsWith('CW ') ? 'priced, count unsettled (Q-1)'
+                                  : 'priced, not in any room')
+    : 'no rate';
+  return `<span class="warn-text" title="${escapeHtml(row.message)}">`
+       + `<span aria-hidden="true">⚠ </span>${reason}</span>`;
+}

@@ -219,8 +219,8 @@ def get_takeoff_derivation(room_id: str, finish_slot_id: str,
 
 @app.get("/api/room-type-mapping")
 def get_room_type_mapping() -> dict[str, Any]:
-    model, _ = state.require()
-    return {"mappings": service.room_type_mapping(model),
+    model, params = state.require()
+    return {"mappings": service.room_type_mapping(model, params),
             "targets": service.priceable_room_types(model)}
 
 

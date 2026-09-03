@@ -9,7 +9,7 @@
 // The importer proposes; nobody's guess is treated as a decision. Each link
 // stays flagged until somebody here agrees with it.
 
-import { api, refresh, route } from '../app.js';
+import { api, fmt, refresh, route } from '../app.js';
 import { createGrid } from '../grid.js';
 import { escapeHtml } from '../panel.js';
 
@@ -21,16 +21,34 @@ route('/mapping', async (main) => {
   main.innerHTML = `
     <div class="screen-head">
       <h1>Room type pricing</h1>
-      <p>Which block of the rate library prices each room. The importer proposed these links
-         by name; each one is a guess until you agree with it, and getting one wrong prices a
-         bedroom as a toilet.</p>
+      <p>Your sizes sheets and your rate list call the same room by different names.
+         This is where the two are joined up.</p>
     </div>
+
+    <div class="card explainer">
+      <div class="card-body">
+        <p style="margin-top:0"><strong>Why you are being asked.</strong>
+        <span class="mono">Flat Sizes</span> calls a room <span class="mono">M. Bedroom</span>;
+        the rate-list block that prices it is called <span class="mono">M. Bed</span>.
+        Only <strong>${mappings.filter(m => m.own_schedule).length} of ${mappings.length}</strong>
+        room types match by name. For the rest the importer picked the closest match —
+        <span class="mono">M. Toilet → Toilet With M. Bed</span>,
+        <span class="mono">Balcony → Balcony / Utility</span> — and left each one flagged,
+        because a guess that nobody checked is how a bedroom ends up priced as a toilet.</p>
+        <p style="margin-bottom:0"><strong>Confirming means:</strong> “yes, this block of the
+        rate library is what prices this room.” It changes no money on its own — the rooms are
+        already costed on these links, and the amount beside each one is what it is currently
+        worth. Confirming records that a person agreed, and clears the flag. Disagree with one?
+        Change it in the dropdown instead.</p>
+      </div>
+    </div>
+
     <div class="toolbar">
       <span class="chip ${unconfirmed.length ? 'warn' : 'ok'}">
-        ${unconfirmed.length} awaiting confirmation</span>
-      <span class="chip ${unmapped.length ? 'bad' : 'mute'}">${unmapped.length} unpriceable</span>
+        ${unconfirmed.length} still flagged as a guess</span>
+      <span class="chip ${unmapped.length ? 'bad' : 'mute'}">${unmapped.length} that cannot be priced</span>
       ${unconfirmed.length
-        ? '<button class="btn primary" id="confirmAll">Confirm all proposals</button>' : ''}
+        ? '<button class="btn primary" id="confirmAll">Agree with all ' + unconfirmed.length + ' proposals</button>' : ''}
     </div>
     <div class="card"><div id="grid"></div></div>`;
 
@@ -45,6 +63,10 @@ route('/mapping', async (main) => {
       { key: 'finishes', label: 'Finishes', kind: 'derived', dp: 0, width: '80px',
         flagMissing: true,
         render: v => v ? String(v) : '<span class="tag bad">none</span>' },
+      { key: 'amount', label: 'Currently worth', kind: 'derived', width: '128px',
+        title: 'What this room type costs on the link as it stands. Agreeing does '
+             + 'not change it — the rooms are already priced this way.',
+        render: v => (v ? fmt.money(v) : '<span class="muted">—</span>') },
       { key: 'confirmed', label: 'Agreed', kind: 'derived', width: '130px', align: 'left',
         render: (v, r) => v
           ? '<span class="tag ok">confirmed</span>'

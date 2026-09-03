@@ -354,7 +354,8 @@ def room_costs(model: ProjectModel, params: ParameterSet,
     return out
 
 
-def room_type_mapping(model: ProjectModel) -> list[dict[str, Any]]:
+def room_type_mapping(model: ProjectModel,
+                      params: ParameterSet) -> list[dict[str, Any]]:
     """Which rate block prices each room type, and whether anyone has agreed.
 
     The sizes sheets and the rate list name rooms differently -- ``M. Bedroom``
@@ -362,11 +363,17 @@ def room_type_mapping(model: ProjectModel) -> list[dict[str, Any]]:
     twenty-five match by name, so without this every other room is measured and
     unpriced.
     """
+    from qs_engine.rules.takeoff import by_room_type, compute_takeoff
+
     used = {r.room_type_id for r in model.unit_type_rooms}
     priced = {s.room_type_id for s in model.room_finish_specs}
     rooms_per_type: dict[str, int] = {}
     for room in model.unit_type_rooms:
         rooms_per_type[room.room_type_id] = rooms_per_type.get(room.room_type_id, 0) + 1
+
+    # What each link is currently worth, so agreeing to one is an informed
+    # decision rather than a shrug.
+    worth = {g.key: g.amount for g in by_room_type(compute_takeoff(model, params))}
 
     out = []
     for room_type in sorted(model.room_types, key=lambda t: t.name):
@@ -383,6 +390,7 @@ def room_type_mapping(model: ProjectModel) -> list[dict[str, Any]]:
             "confirmed": room_type.mapping_confirmed,
             "own_schedule": room_type.id in priced,
             "finishes": len(model.finish_spec_for(room_type.id)),
+            "amount": worth.get(room_type.id, 0.0),
         })
     return out
 

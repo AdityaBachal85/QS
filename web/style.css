@@ -317,3 +317,7 @@ td.editing select {
 }
 @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
 @media (prefers-reduced-motion: reduce) { .skeleton-row { animation: none; } }
+
+/* A screen that asks the user to decide something explains itself first. */
+.explainer { border-left: 3px solid var(--accent, #1E40AF); }
+.explainer .card-body p { max-width: 78ch; line-height: 1.55; }

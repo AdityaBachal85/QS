@@ -231,7 +231,10 @@ RESOURCES: dict[str, Resource] = {
         "room-openings", M.RoomOpening, "room_openings", "opening",
         required=("unit_type_room_id", "opening_type_id"),
         prepare=_prepare_room_opening,
-        editable=("count", "linear_qty_m"),
+        # Which door sits in this room is a decision, not a computed value, so
+        # it is editable. It was missing, and changing an opening's type came
+        # back as "derived values cannot be set" -- which was wrong twice over.
+        editable=("count", "linear_qty_m", "opening_type_id", "serves_room_id"),
     ),
     "rate-items": Resource(
         "rate-items", M.RateItem, "rate_items", "rate",
@@ -346,15 +349,39 @@ def update(model: M.ProjectModel, name: str, entity_id: str,
 
     for key, value in payload.items():
         if key not in spec.editable:
-            raise CrudError(
-                f"{key!r} is not an input on a {spec.label}. Derived values are "
-                f"computed and cannot be set."
-            )
+            raise CrudError(_refusal(spec, key))
         old = getattr(item, key)
         annotation = {f.name: f.type for f in fields(spec.cls)}[key]
         setattr(item, key, _coerce(value, annotation, old))
         changes.append((key, old, getattr(item, key)))
     return changes
+
+
+#: Values that are computed from other values and therefore have no field to
+#: write to. Naming them lets the refusal say *why*, instead of calling every
+#: unlisted key derived -- which is how changing an opening's type came back as
+#: "derived values are computed and cannot be set".
+DERIVED_NAMES: frozenset[str] = frozenset({
+    "area_sqft", "area_sqm", "total_sqft", "overall_rate", "amount",
+    "total_amount", "total_qty", "net", "gross", "deduction", "blended_rate",
+    "quantity", "rate_per_sqft", "quantity_sqft",
+})
+
+
+def _article(word: str) -> str:
+    return "an" if word[:1].lower() in "aeiou" else "a"
+
+
+def _refusal(spec: Resource, key: str) -> str:
+    """Say which of the two reasons applies, and what can be edited."""
+    if key in DERIVED_NAMES:
+        return (f"{key!r} is computed from other values, so there is no field "
+                f"to set. Change what it is derived from instead.")
+    if key in {f.name for f in fields(spec.cls)}:
+        return (f"{key!r} is not editable on {_article(spec.label)} {spec.label}. "
+                f"Editable here: " + ", ".join(spec.editable) + ".")
+    return (f"{_article(spec.label)} {spec.label} has no {key!r}. Editable here: "
+            + ", ".join(spec.editable) + ".")
 
 
 def _coerce(value: Any, annotation: Any, old: Any) -> Any:
