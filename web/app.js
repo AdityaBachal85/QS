@@ -154,7 +154,8 @@ window.addEventListener('hashchange', render);
 // here makes the ordering explicit instead of accidental.
 const SCREENS = [
   'overview', 'room-config', 'unit-types', 'openings', 'rates', 'mapping',
-  'takeoff', 'parameters', 'validation', 'reconciliation', 'audit',
+  'takeoff', 'finish-totals', 'parameters', 'validation', 'reconciliation',
+  'audit',
 ];
 
 (async function boot() {

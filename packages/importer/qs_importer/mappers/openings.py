@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import re
 
-from qs_engine.model import OpeningKind, OpeningType, ProjectModel, RoomOpening
+from qs_engine.model import (BuildupMethod, OpeningKind, OpeningType,
+                             ProjectModel, RateItem, RateRevision, RoomOpening)
 
 from ..ids import IdFactory
 from ..reader import Workbook
@@ -59,8 +60,9 @@ def classify_opening(code: str) -> OpeningKind:
     return OpeningKind.WINDOW
 
 
-def map_opening_types(wb: Workbook, model: ProjectModel, ids: IdFactory) -> ProjectModel:
-    """Read the type master, including the eight curtain-wall bays."""
+def map_opening_types(wb: Workbook, model: ProjectModel, ids: IdFactory) -> list[str]:
+    """Read the type master, its rates, and the eight curtain-wall bays."""
+    warnings: list[str] = []
     for row in range(SCHEDULE_FIRST_ROW, SCHEDULE_LAST_ROW + 1):
         code = wb.text(SCHEDULE_SHEET, f"B{row}")
         if not code:
@@ -68,7 +70,7 @@ def map_opening_types(wb: Workbook, model: ProjectModel, ids: IdFactory) -> Proj
         for part in [c.strip() for c in code.split("/") if c.strip()]:
             # "BR/UR" is one schedule row but two codes in the take-off, and the
             # window summary lists them separately. Split so both resolve.
-            model.opening_types.append(OpeningType(
+            opening = OpeningType(
                 id=ids.make(model.project.id, "op", part),
                 project_id=model.project.id,
                 code=part,
@@ -76,13 +78,17 @@ def map_opening_types(wb: Workbook, model: ProjectModel, ids: IdFactory) -> Proj
                 width_m=float(wb.number(SCHEDULE_SHEET, f"C{row}", 0.0) or 0.0),
                 height_m=float(wb.number(SCHEDULE_SHEET, f"D{row}", 0.0) or 0.0),
                 specification=f"{SCHEDULE_SHEET}!B{row}",
-            ))
+            )
+            model.opening_types.append(opening)
+            warning = _rate_for(wb, model, ids, opening, row, code)
+            if warning:
+                warnings.append(warning)
 
     for row in range(CURTAIN_FIRST_ROW, CURTAIN_LAST_ROW + 1):
         label = wb.text(SCHEDULE_SHEET, f"B{row}")
         if not label:
             continue
-        model.opening_types.append(OpeningType(
+        opening = OpeningType(
             id=ids.make(model.project.id, "op", "cw", label),
             project_id=model.project.id,
             code=f"CW {label}",
@@ -90,8 +96,74 @@ def map_opening_types(wb: Workbook, model: ProjectModel, ids: IdFactory) -> Proj
             width_m=float(wb.number(SCHEDULE_SHEET, f"C{row}", 0.0) or 0.0),
             height_m=float(wb.number(SCHEDULE_SHEET, f"D{row}", 0.0) or 0.0),
             specification=f"Curtain wall bay, {SCHEDULE_SHEET}!B{row}",
-        ))
-    return model
+        )
+        model.opening_types.append(opening)
+        warning = _rate_for(wb, model, ids, opening, row, label)
+        if warning:
+            warnings.append(warning)
+    return warnings
+
+
+#: What each kind of opening is priced by.  Doors are bought by the leaf, glazing
+#: by the square metre, railings by the running metre.  Getting this wrong is not
+#: a rounding error -- it is the C-35 class of defect, so it is stated once here
+#: and enforced by ``units.amount`` at the point of multiplication.
+RATE_UNIT: dict[OpeningKind, str] = {
+    OpeningKind.DOOR: "NOS",
+    OpeningKind.WINDOW: "SQM",
+    OpeningKind.VENTILATOR: "SQM",
+    OpeningKind.CURTAIN_WALL: "SQM",
+    OpeningKind.RAILING: "RM",
+}
+
+#: ``=550*10.764`` -- a rate quoted per square foot, converted inside the
+#: formula.  Captured so the 550 stays the price and the 10.764 stays the
+#: parameter, instead of both collapsing into a constant Rs 5,920.20.
+_PER_SQFT = re.compile(r"^=\s*([0-9.]+)\s*\*\s*10\.764\s*$")
+
+
+def _rate_for(wb: Workbook, model: ProjectModel, ids: IdFactory,
+              opening: OpeningType, row: int, label: str) -> str | None:
+    """Give one opening type its rate from ``D&W Schedule`` column F.
+
+    Returns a warning when the row carries no rate at all, so an unpriced
+    opening is reported rather than silently costing nothing (C-11).
+    """
+    value = wb.number(SCHEDULE_SHEET, f"F{row}")
+    if value is None:
+        return (f"{SCHEDULE_SHEET}!F{row}: opening type {opening.code!r} has no "
+                f"rate. It will be measured and reported as unpriced.")
+
+    formula = wb.formula(SCHEDULE_SHEET, f"F{row}") or ""
+    match = _PER_SQFT.match(formula.replace(" ", ""))
+    unit = RATE_UNIT.get(opening.kind, "SQM")
+
+    item = RateItem(
+        id=ids.make(model.project.id, "rate", "dw", opening.code),
+        project_id=model.project.id,
+        code=f"DW-{opening.code.upper().replace(' ', '-')}",
+        description=f"{label} ({opening.code})" if label != opening.code else opening.code,
+        unit=unit,
+        category="Doors & Windows",
+        specification=f"{SCHEDULE_SHEET}!F{row}",
+    )
+    if match:
+        revision = RateRevision(
+            id=ids.make(model.project.id, "rev", "dw", opening.code),
+            rate_item_id=item.id, method=BuildupMethod.AREA_SIMPLE,
+            basic_rate=float(match.group(1)),
+            source=f"{SCHEDULE_SHEET}!F{row} = {formula}")
+    else:
+        revision = RateRevision(
+            id=ids.make(model.project.id, "rev", "dw", opening.code),
+            rate_item_id=item.id, method=BuildupMethod.CONSTANT,
+            constant_value=float(value),
+            source=f"{SCHEDULE_SHEET}!F{row}")
+
+    model.rate_items.append(item)
+    model.rate_revisions.append(revision)
+    opening.rate_item_id = item.id
+    return None
 
 
 def _opening_type_index(model: ProjectModel) -> dict[str, OpeningType]:
@@ -287,8 +359,7 @@ def _create_orphan_room(wb: Workbook, sheet: str, row: int, name: str,
 
 def map_openings(wb: Workbook, model: ProjectModel, ids: IdFactory) -> list[str]:
     """Type master plus both take-off schedules."""
-    map_opening_types(wb, model, ids)
-    warnings: list[str] = []
+    warnings: list[str] = list(map_opening_types(wb, model, ids))
     # The two sheets keep the block's unit count in different columns: Doors in
     # K, Windows in Q. Neither is a formula on the common-area rows.
     for sheet, first, last, count_col in (("Doors", 4, 140, "K"),

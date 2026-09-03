@@ -119,3 +119,50 @@ def test_every_write_is_audited(client):
     assert len(entries) > before
     assert entries[0]["field"] == "basic_rate"
     assert entries[0]["new_value"] == "123"
+
+
+# --------------------------------------------------------------------------
+# One number, one answer -- the views must not drift apart
+# --------------------------------------------------------------------------
+
+def test_the_room_view_and_the_takeoff_measure_the_same_wall(client):
+    """Wall area depends on the floor, so both screens must resolve it the same.
+
+    The take-off folds a unit type over the floors it sits on. The Unit Types
+    screen shows one room at a time. If that screen fell back to the project
+    default height while the take-off used the floor's, the two would report
+    different walls for one room -- exactly the disagreement this platform
+    exists to remove.
+    """
+    types = client.get("/api/unit-types").json()
+    unit = next(t for t in types if t["rooms"] and t["count"])
+
+    detail = client.get(f"/api/unit-types/{unit['id']}/rooms").json()
+    assert detail["heights"], "a unit type with a count sits on at least one floor"
+    assert detail["floor_height_m"] == max(
+        detail["heights"], key=lambda h: h["count"])["height_m"]
+
+    room = next(r for r in detail["rooms"] if r["perimeter_m"])
+    wall = next(q for q in room["quantities"] if q["rule"] == "wall_finish")
+
+    lines = client.get(f"/api/takeoff?unit_type_id={unit['id']}").json()["lines"]
+    matching = [l for l in lines
+                if l["room_id"] == room["id"] and l["rule"] == "wall_finish"
+                and l["gross"]]
+    assert matching, "the take-off measures this room's wall too"
+    assert wall["gross"] == pytest.approx(
+        max(matching, key=lambda l: l["unit_count"])["gross"], rel=1e-9)
+
+
+def test_the_wall_derivation_names_where_its_height_came_from(client):
+    """A QS should be able to see that 4.2 came from the floor, not a default."""
+    types = client.get("/api/unit-types").json()
+    unit = next(t for t in types if t["rooms"] and t["count"])
+    detail = client.get(f"/api/unit-types/{unit['id']}/rooms").json()
+    room = next(r for r in detail["rooms"] if r["perimeter_m"])
+    wall = next(q for q in room["quantities"] if q["rule"] == "wall_finish")
+
+    names = {i["name"]: i for i in wall["gross_derivation"]["inputs"]}
+    assert "floor_to_floor_ht" in names
+    assert names["floor_to_floor_ht"]["source"] in {"floor", "room", "parameter"}
+    assert "slab_allowance_m" in names

@@ -143,6 +143,18 @@ def get_takeoff(unit_type_id: str | None = None) -> dict[str, Any]:
     return service.takeoff(model, params, unit_type_id)
 
 
+@app.get("/api/opening-totals")
+def get_opening_totals() -> dict[str, Any]:
+    model, params = state.require()
+    return service.opening_costs(model, params)
+
+
+@app.get("/api/finish-totals")
+def get_finish_totals() -> dict[str, Any]:
+    model, params = state.require()
+    return service.finish_totals(model, params)
+
+
 @app.get("/api/room-type-mapping")
 def get_room_type_mapping() -> dict[str, Any]:
     model, _ = state.require()

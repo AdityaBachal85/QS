@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from enum import Enum
 
 from qs_engine.model import OpeningKind
-from qs_engine.rules.schedule import opening_schedule, total_openings
+from qs_engine.rules.schedule import (opening_schedule, opening_totals,
+                                      total_openings)
 from qs_engine.rules.unit_area import unit_type_total_sqft
 
 from .pipeline import ImportResult
@@ -137,6 +138,42 @@ def build_lines(result: ImportResult) -> list[Line]:
         unit = line.unit if line else "SQM"
         lines.append(Line("Openings", f"{code} ({'RM' if unit == 'RM' else 'sq.m'})",
                           excel, line.quantity if line else 0.0, f"Windows!F{row}"))
+
+    # -- Opening costs ----------------------------------------------------
+    # The counts were always reconciled; the money is new. `D&W Schedule`
+    # column F carries a rate against every type and nothing was reading it.
+    bands = {t.key: t for t in opening_totals(model, params)}
+
+    doors_line = Line("Opening Costs", "Doors: total cost",
+                      wb.number("Doors", "H150") or 0.0,
+                      bands["doors"].amount if "doors" in bands else 0.0,
+                      "Doors!H150 = SUM(H146:H149)")
+    doors_line.expected_delta = -60000.0
+    doors_line.explanation = (
+        "C-36 again, in money: the two smoke-check lobbies are 36 here and 37 "
+        "in Doors!K137/K138, so the schedule carries 2 fewer FRD at Rs 30,000 "
+        "each. The other three door types agree to the rupee.")
+    lines.append(doors_line)
+
+    # Windows!D166:H177 lists windows, the ventilator and both railings in one
+    # table, so it is compared against the same three bands added together.
+    glazing = sum(bands[k].amount for k in ("windows", "ventilators", "railings")
+                  if k in bands)
+    lines.append(Line("Opening Costs", "Windows, ventilators & railings",
+                      wb.number("Windows", "H178") or 0.0, glazing,
+                      "Windows!H178 = SUM(H166:H177)"))
+
+    curtain = Line("Opening Costs", "Curtain wall",
+                   wb.number("D&W Schedule", "G33") or 0.0,
+                   bands["curtain_wall"].amount if "curtain_wall" in bands else 0.0,
+                   "D&W Schedule!G33 = E33*F33")
+    curtain.expected_delta = -(wb.number("D&W Schedule", "G33") or 0.0)
+    curtain.explanation = (
+        "Q-1, open: the eight bays are priced but reach no room, because the "
+        "workbook multiplies them by 32 (D&W Schedule!E32) where the building "
+        "has 4 office floors. Rather than guess, the bays carry their rate and "
+        "report as measured-at-nothing until the count is settled.")
+    lines.append(curtain)
 
     # -- Module 4 ---------------------------------------------------------
     from qs_engine.model import BuildupMethod, RateRevision

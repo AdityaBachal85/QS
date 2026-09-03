@@ -28,8 +28,8 @@ from ..model import ProjectModel, UnitTypeRoom
 from ..params import ParameterSet
 from ..provenance import Derived
 from ..rules.rate_buildup import RateBuildupError, effective_rate
-from ..rules.room_qty import (NegativeNetQuantityError, QtyRuleError,
-                              compute_room_quantity)
+from ..rules.room_qty import (HEIGHT_DEPENDENT_RULES, NegativeNetQuantityError,
+                              QtyRuleError, compute_room_quantity)
 from ..units import Quantity, Rate, UnitConverter, UnitMismatchError, amount
 
 
@@ -49,6 +49,7 @@ class TakeoffLine:
     room_id: str
     room_label: str
     room_type_id: str
+    room_type_name: str
     finish_slot_id: str
     finish_name: str
     qty_rule: str
@@ -65,6 +66,10 @@ class TakeoffLine:
     total_amount: float
     status: str
     message: str = ""
+    #: The floor-to-floor height this line was measured against, and the floors
+    #: it covers.  A unit type spanning two heights yields two wall lines.
+    floor_height_m: float | None = None
+    floor_scope: str = ""
     #: Kept so the derivation panel can show the working behind any figure.
     gross_derivation: Derived | None = field(default=None, repr=False)
     deduction_derivation: Derived | None = field(default=None, repr=False)
@@ -73,6 +78,40 @@ class TakeoffLine:
     @property
     def is_priced(self) -> bool:
         return self.status == LineStatus.PRICED
+
+
+def _placements(model: ProjectModel, unit, rule: str | None
+                ) -> list[tuple[float | None, int, str]]:
+    """How many lines this unit type needs for this rule, and at what heights.
+
+    A height-driven rule on a unit type that spans two floor heights becomes two
+    lines -- an Office is 2.9 m on the podiums and 4.2 m on the ground floor, and
+    averaging those would be inventing a building that does not exist.  Every
+    other rule collapses back to one line, so flooring is not split into
+    fragments that only get re-summed.
+
+    The counts always sum to ``unit_count``, whichever branch is taken.
+    """
+    placements = model.height_placements(unit.id)
+    if not placements:
+        return [(None, model.unit_count(unit.id), "")]
+
+    if rule in HEIGHT_DEPENDENT_RULES and len(placements) > 1:
+        return [(p.height_m, p.count, _scope(p)) for p in placements]
+
+    heights = {p.height_m for p in placements}
+    return [(placements[0].height_m if len(heights) == 1 else None,
+             sum(p.count for p in placements), "")]
+
+
+def _scope(placement) -> str:
+    """A short label naming the floors a split line covers."""
+    names = placement.floors
+    if not names:
+        return ""
+    if len(names) <= 2:
+        return ", ".join(names)
+    return f"{names[0]} + {len(names) - 1} more"
 
 
 def compute_takeoff(model: ProjectModel, params: ParameterSet,
@@ -88,28 +127,32 @@ def compute_takeoff(model: ProjectModel, params: ParameterSet,
                   else sorted(model.unit_types, key=lambda u: u.seq))
 
     for unit in unit_types:
-        count = model.unit_count(unit.id)
         for room in model.rooms_of(unit.id):
             for spec in model.finish_spec_for(room.room_type_id):
                 slot = slots.get(spec.finish_slot_id)
                 if slot is None:
                     continue
                 rule = spec.qty_rule or slot.qty_rule
-                lines.append(_line(model, params, converter, unit, count, room,
-                                   spec, slot, rule, rate_items))
+                for height, count, scope in _placements(model, unit, rule):
+                    lines.append(_line(model, params, converter, unit, count,
+                                       room, spec, slot, rule, rate_items,
+                                       height, scope))
     return lines
 
 
 def _line(model, params, converter, unit, count, room: UnitTypeRoom,
-          spec, slot, rule, rate_items) -> TakeoffLine:
+          spec, slot, rule, rate_items, floor_height_m=None,
+          floor_scope="") -> TakeoffLine:
     base = dict(
         unit_type_id=unit.id, unit_type_code=unit.code,
         room_id=room.id, room_label=room.label, room_type_id=room.room_type_id,
+        room_type_name=model.room_type(room.room_type_id).name,
         finish_slot_id=slot.id, finish_name=slot.name, qty_rule=rule or "",
         unit="", gross=0.0, deduction=0.0, net=0.0,
         unit_count=count, total_qty=0.0,
         rate_item_id=spec.rate_item_id, rate_description="", rate=None,
         amount_per_unit=0.0, total_amount=0.0, status=LineStatus.ERROR,
+        floor_height_m=floor_height_m, floor_scope=floor_scope,
     )
 
     if not rule:
@@ -117,7 +160,8 @@ def _line(model, params, converter, unit, count, room: UnitTypeRoom,
                               "message": f"{slot.name} has no quantity rule"})
 
     try:
-        quantity = compute_room_quantity(room, rule, model, params, converter)
+        quantity = compute_room_quantity(room, rule, model, params, converter,
+                                         floor_height_m)
     except (QtyRuleError, NegativeNetQuantityError, UnitMismatchError) as exc:
         return TakeoffLine(**{**base, "status": LineStatus.ERROR,
                               "message": str(exc)})
@@ -178,6 +222,22 @@ class Group:
     amount: float
     lines: int
     unpriced: int = 0
+    #: The same quantity in square feet, for areas only.  The conversion uses
+    #: the project's own ``factor_sqm_to_sqft`` (10.764), not the exact 10.7639,
+    #: so the figure agrees with the workbook's.
+    quantity_sqft: float | None = None
+
+    @property
+    def rate_per_sqft(self) -> float | None:
+        """Amount over square feet.  Derived, and labelled as derived.
+
+        A QS reads areas in square feet and rates per square foot; the money is
+        still computed from the square-metre pair, so this is a presentation of
+        the same number and never an input to it.
+        """
+        if not self.quantity_sqft:
+            return None
+        return self.amount / self.quantity_sqft
 
     @property
     def blended_rate(self) -> float | None:
@@ -192,38 +252,80 @@ class Group:
         return self.amount / self.quantity if self.quantity else None
 
 
-def by_finish(lines: list[TakeoffLine]) -> list[Group]:
-    """Totals per finish slot, across the whole project."""
-    return _group(lines, lambda l: (l.finish_slot_id, l.finish_name))
+def by_finish(lines: list[TakeoffLine],
+              params: ParameterSet | None = None) -> list[Group]:
+    """Totals per finish slot, across every unit type in the project.
+
+    This is the whole building's flooring, the whole building's skirting -- the
+    view the workbook never had, because its totals were per block.
+    """
+    return _group(lines, lambda l: (l.finish_slot_id, l.finish_name), params)
 
 
-def by_unit_type(lines: list[TakeoffLine]) -> list[Group]:
-    return _group(lines, lambda l: (l.unit_type_id, l.unit_type_code))
+def by_unit_type(lines: list[TakeoffLine],
+                 params: ParameterSet | None = None) -> list[Group]:
+    return _group(lines, lambda l: (l.unit_type_id, l.unit_type_code), params)
 
 
-def by_room(lines: list[TakeoffLine]) -> list[Group]:
-    return _group(lines, lambda l: (l.room_id, l.room_label))
+def by_room(lines: list[TakeoffLine],
+            params: ParameterSet | None = None) -> list[Group]:
+    return _group(lines, lambda l: (l.room_id, l.room_label), params)
 
 
-def _group(lines: list[TakeoffLine], key) -> list[Group]:
-    groups: dict[str, Group] = {}
+def by_room_type(lines: list[TakeoffLine],
+                 params: ParameterSet | None = None) -> list[Group]:
+    """Totals per room type -- every Bedroom in the building, every Toilet."""
+    return _group(lines, lambda l: (l.room_type_id, l.room_type_name), params)
+
+
+def by_finish_and_room_type(lines: list[TakeoffLine],
+                            params: ParameterSet | None = None) -> list[Group]:
+    """The matrix cell: one finish, in one kind of room, building-wide.
+
+    "Total flooring area in toilets" is one of these, and it is a filter over
+    the same lines as every other total, so it cannot disagree with them.
+    """
+    return _group(
+        lines,
+        lambda l: (f"{l.finish_slot_id}|{l.room_type_id}",
+                   f"{l.finish_name} — {l.room_type_name}"),
+        params)
+
+
+def _group(lines: list[TakeoffLine], key,
+           params: ParameterSet | None = None) -> list[Group]:
+    """Fold lines into totals, one bucket per key.
+
+    Quantities only add up within one unit, so a bucket holding both square
+    metres and running metres reports the money and leaves the quantity blank
+    rather than summing the two.  A line that failed to measure carries no unit
+    at all, and is counted as unpriced without being allowed to blank out the
+    unit of the lines that did measure.
+    """
+    sqft = params["factor_sqm_to_sqft"] if params is not None else None
+    buckets: dict[str, list[TakeoffLine]] = {}
+    labels: dict[str, str] = {}
     for line in lines:
         group_key, label = key(line)
-        group = groups.get(group_key)
-        if group is None:
-            group = Group(group_key, label, line.unit, 0.0, 0.0, 0)
-            groups[group_key] = group
-        # Quantities only add up within one unit; a group spanning units
-        # reports the money and leaves the quantity blank rather than summing
-        # square metres and running metres together.
-        if group.unit and group.unit != line.unit:
-            group.unit = ""
-        group.quantity += line.total_qty if group.unit else 0.0
-        group.amount += line.total_amount
-        group.lines += 1
-        if not line.is_priced:
-            group.unpriced += 1
-    return sorted(groups.values(), key=lambda g: -g.amount)
+        buckets.setdefault(group_key, []).append(line)
+        labels.setdefault(group_key, label)
+
+    groups: list[Group] = []
+    for group_key, rows in buckets.items():
+        units = {r.unit for r in rows if r.unit}
+        unit = units.pop() if len(units) == 1 else ""
+        quantity = sum(r.total_qty for r in rows if r.unit == unit) if unit else 0.0
+        group = Group(
+            key=group_key, label=labels[group_key], unit=unit,
+            quantity=quantity,
+            amount=sum(r.total_amount for r in rows),
+            lines=len(rows),
+            unpriced=sum(1 for r in rows if not r.is_priced),
+        )
+        if sqft and unit == "SQM":
+            group.quantity_sqft = quantity * sqft
+        groups.append(group)
+    return sorted(groups, key=lambda g: -g.amount)
 
 
 def total_amount(lines: list[TakeoffLine]) -> float:

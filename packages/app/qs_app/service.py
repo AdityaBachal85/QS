@@ -16,7 +16,9 @@ from qs_engine.params import ParameterSet
 from qs_engine.rules.rate_buildup import RateBuildupError, effective_rate
 from qs_engine.rules.room_qty import (RULE_DEDUCTIONS, NegativeNetQuantityError,
                                       compute_room_quantity)
-from qs_engine.rules.schedule import opening_schedule, total_openings
+from qs_engine.rules.schedule import (opening_schedule, opening_totals,
+                                      priced_opening_schedule,
+                                      total_opening_amount, total_openings)
 from qs_engine.rules.unit_area import (room_area_sqft, room_total_sqft,
                                        unit_type_area_sqft,
                                        unit_type_area_sqm, unit_type_total_sqft)
@@ -115,6 +117,17 @@ def unit_rooms(model: ProjectModel, params: ParameterSet,
                unit_type_id: str) -> dict[str, Any]:
     """One unit type's rooms, with every derived figure and its openings."""
     unit = model.unit_type(unit_type_id)
+
+    # Wall quantities depend on the floor the unit sits on, so this view has to
+    # resolve the same height the take-off does -- otherwise the two screens
+    # would report different walls for one room, which is the class of defect
+    # this platform exists to remove. Where a type spans floors of different
+    # heights the rooms are shown at the predominant one, and every height is
+    # reported alongside so the split is visible rather than averaged away.
+    placements = model.height_placements(unit_type_id)
+    dominant = max(placements, key=lambda p: p.count) if placements else None
+    floor_height_m = dominant.height_m if dominant else None
+
     openings_by_room: dict[str, list[dict[str, Any]]] = {}
     for o in model.room_openings:
         ot = model.opening_type(o.opening_type_id)
@@ -140,12 +153,15 @@ def unit_rooms(model: ProjectModel, params: ParameterSet,
             "total_sqft": room_total_sqft(r, params).value,
             "derivation": _derivation(area),
             "openings": openings_by_room.get(r.id, []),
-            "quantities": room_quantities(model, params, r.id),
+            "quantities": room_quantities(model, params, r.id, floor_height_m),
         })
     return {
         "unit_type": {"id": unit.id, "code": unit.code,
                       "classification": unit.classification,
                       "count": model.unit_count(unit.id)},
+        "floor_height_m": floor_height_m,
+        "heights": [{"height_m": p.height_m, "count": p.count,
+                     "floors": list(p.floors)} for p in placements],
         "rooms": rows,
         "area_sqft": unit_type_area_sqft(unit_type_id, model, params).value,
         "total_sqft": unit_type_total_sqft(unit_type_id, model, params).value,
@@ -158,7 +174,8 @@ QUANTITY_RULES = ("floor_area", "skirting", "wall_finish", "dado",
 
 
 def room_quantities(model: ProjectModel, params: ParameterSet,
-                    room_id: str) -> list[dict[str, Any]]:
+                    room_id: str,
+                    floor_height_m: float | None = None) -> list[dict[str, Any]]:
     """Gross, deduction and net for every finish in one room.
 
     This is the answer to "when we give costing we minus the doors and windows,
@@ -172,7 +189,8 @@ def room_quantities(model: ProjectModel, params: ParameterSet,
         entry: dict[str, Any] = {"rule": rule,
                                  "deduction_rule": RULE_DEDUCTIONS.get(rule, "none")}
         try:
-            q = compute_room_quantity(room, rule, model, params)
+            q = compute_room_quantity(room, rule, model, params,
+                                      floor_height_m=floor_height_m)
             entry.update({
                 "unit": q.gross.unit.code,
                 "gross": q.gross.value,
@@ -263,6 +281,14 @@ def _line_json(line) -> dict[str, Any]:
     }
 
 
+def _group_json(groups) -> list[dict[str, Any]]:
+    return [{"key": g.key, "label": g.label, "unit": g.unit,
+             "quantity": g.quantity, "quantity_sqft": g.quantity_sqft,
+             "amount": g.amount, "lines": g.lines, "unpriced": g.unpriced,
+             "blended_rate": g.blended_rate,
+             "rate_per_sqft": g.rate_per_sqft} for g in groups]
+
+
 def takeoff(model: ProjectModel, params: ParameterSet,
             unit_type_id: str | None = None) -> dict[str, Any]:
     """Every finish in every room, priced.
@@ -275,17 +301,11 @@ def takeoff(model: ProjectModel, params: ParameterSet,
                                          total_amount, unpriced)
 
     lines = compute_takeoff(model, params, unit_type_id)
-    def group_json(groups):
-        return [{"key": g.key, "label": g.label, "unit": g.unit,
-                 "quantity": g.quantity, "amount": g.amount,
-                 "lines": g.lines, "unpriced": g.unpriced,
-                 "blended_rate": g.blended_rate} for g in groups]
-
     missing = unpriced(lines)
     return {
         "lines": [_line_json(l) for l in lines],
-        "by_finish": group_json(by_finish(lines)),
-        "by_unit_type": group_json(by_unit_type(lines)),
+        "by_finish": _group_json(by_finish(lines, params)),
+        "by_unit_type": _group_json(by_unit_type(lines, params)),
         "total": total_amount(lines),
         "line_count": len(lines),
         "priced_count": sum(1 for l in lines if l.is_priced),
@@ -362,4 +382,84 @@ def validation(model: ProjectModel, params: ParameterSet) -> dict[str, Any]:
                             key=lambda f: {"blocking": 0, "warning": 1,
                                            "info": 2}[f.severity.value])
         ],
+    }
+
+
+# --------------------------------------------------------------------------
+# Totals -- the whole building in one view
+# --------------------------------------------------------------------------
+
+def opening_costs(model: ProjectModel, params: ParameterSet) -> dict[str, Any]:
+    """Every door, window, railing and curtain-wall bay, counted and priced.
+
+    Counts were always folded correctly here; the money is new. A door is
+    priced by the leaf and glazing by the square metre, and the multiplication
+    goes through the unit-safe path, so a per-Nos. rate cannot be applied to an
+    area.
+    """
+    lines = priced_opening_schedule(model, params)
+    return {
+        "lines": [{
+            "code": l.code, "kind": l.kind.value,
+            "width_m": l.width_m, "height_m": l.height_m,
+            "count": l.count, "quantity": l.quantity, "unit": l.unit,
+            "rate": l.rate, "rate_unit": l.rate_unit,
+            "rate_item_id": l.rate_item_id,
+            "rate_description": l.rate_description,
+            "amount": l.amount, "status": l.status, "message": l.message,
+        } for l in lines],
+        "bands": [{
+            "key": b.key, "label": b.label, "unit": b.unit, "count": b.count,
+            "quantity": b.quantity, "amount": b.amount, "lines": b.lines,
+            "unpriced": b.unpriced,
+        } for b in opening_totals(model, params)],
+        "total": total_opening_amount(model, params),
+        "total_count": sum(l.count for l in lines),
+        "unpriced": [{"code": l.code, "message": l.message}
+                     for l in lines if not l.is_priced],
+    }
+
+
+def finish_totals(model: ProjectModel, params: ParameterSet) -> dict[str, Any]:
+    """The building's finishing, folded three ways.
+
+    By finish, by room type, and by the two together -- "total flooring area in
+    toilets" is one cell of the last. All three are filters over the same
+    take-off lines, so they cannot disagree with each other or with the
+    per-room views.
+    """
+    from qs_engine.rules.takeoff import (by_finish, by_finish_and_room_type,
+                                         by_room_type, by_unit_type,
+                                         compute_takeoff, total_amount)
+
+    lines = compute_takeoff(model, params)
+    total = total_amount(lines)
+    carpet = sum(unit_type_area_sqft(u.id, model, params).value * model.unit_count(u.id)
+                 for u in model.unit_types if not u.is_common_area)
+
+    contributors: dict[str, list[dict[str, Any]]] = {}
+    for group in by_finish(lines, params):
+        rows = [l for l in lines if l.finish_slot_id == group.key]
+        per_unit: dict[str, dict[str, Any]] = {}
+        for line in rows:
+            entry = per_unit.setdefault(line.unit_type_id, {
+                "unit_type_id": line.unit_type_id, "label": line.unit_type_code,
+                "quantity": 0.0, "amount": 0.0, "unit": line.unit})
+            entry["quantity"] += line.total_qty
+            entry["amount"] += line.total_amount
+        contributors[group.key] = sorted(per_unit.values(),
+                                         key=lambda e: -e["amount"])
+
+    return {
+        "by_finish": _group_json(by_finish(lines, params)),
+        "by_room_type": _group_json(by_room_type(lines, params)),
+        "matrix": _group_json(by_finish_and_room_type(lines, params)),
+        "by_unit_type": _group_json(by_unit_type(lines, params)),
+        "contributors": contributors,
+        "total": total,
+        "openings_total": total_opening_amount(model, params),
+        "carpet_area_sqft": carpet,
+        "rate_per_carpet_sqft": (total / carpet) if carpet else None,
+        "line_count": len(lines),
+        "unit_types": len({l.unit_type_id for l in lines}),
     }

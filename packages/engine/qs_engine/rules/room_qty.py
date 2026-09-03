@@ -184,10 +184,27 @@ def compute_deduction(room: UnitTypeRoom, rule_code: str, model: ProjectModel,
 # Gross quantity rules
 # --------------------------------------------------------------------------
 
-def _clear_height(room: UnitTypeRoom, params: ParameterSet) -> float:
+def _clear_height(room: UnitTypeRoom, params: ParameterSet,
+                  floor_height_m: float | None = None) -> tuple[float, str]:
+    """The floor-to-floor height to measure this room's walls against.
+
+    Most specific wins:
+
+    1. the room's own ``clear_height_m`` -- a double-height gym overrides
+       everything below it;
+    2. **the height of the floor the unit actually sits on**, from Room Config;
+    3. the project parameter, only when the unit sits on no floor at all.
+
+    Step 2 is the one the workbook does not have.  ``Internal Finishes Flats!D1``
+    is 3.1, hard-coded once per take-off block, so every Ground Floor wall is
+    measured 1.1 m short and the Terrace 3.35 m short.  Returning the source
+    alongside the value keeps that visible in the derivation panel.
+    """
     if room.clear_height_m is not None:
-        return room.clear_height_m
-    return params.get("default_floor_height_m", 3.1) or 3.1
+        return room.clear_height_m, "room"
+    if floor_height_m is not None:
+        return floor_height_m, "floor"
+    return (params.get("default_floor_height_m", 3.1) or 3.1), "parameter"
 
 
 def _dado_height(room: UnitTypeRoom, params: ParameterSet) -> float:
@@ -196,40 +213,52 @@ def _dado_height(room: UnitTypeRoom, params: ParameterSet) -> float:
     return params.get("default_dado_height_m", 2.1) or 2.1
 
 
-def qty_floor_area(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet) -> Derived:
+def qty_floor_area(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet,
+                   floor_height_m: float | None = None) -> Derived:
     return derive(Quantity.of(room.carpet_area_sqm, "SQM"), "floor_area",
                   f"carpet area = {room.carpet_area_sqm:g}",
                   [Input("carpet_area_sqm", room.carpet_area_sqm)],
                   excel_ref="Internal Finishes Flats!E5 = C4")
 
 
-def qty_ceiling_area(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet) -> Derived:
+def qty_ceiling_area(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet,
+                     floor_height_m: float | None = None) -> Derived:
     return derive(Quantity.of(room.carpet_area_sqm, "SQM"), "ceiling_area",
                   f"carpet area = {room.carpet_area_sqm:g}",
                   [Input("carpet_area_sqm", room.carpet_area_sqm)],
                   excel_ref="Internal Finishes Flats!E9 = E5")
 
 
-def qty_skirting(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet) -> Derived:
+def qty_skirting(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet,
+                 floor_height_m: float | None = None) -> Derived:
     return derive(Quantity.of(room.perimeter_m, "RM"), "skirting",
                   f"perimeter = {room.perimeter_m:g}",
                   [Input("perimeter_m", room.perimeter_m)],
                   excel_ref="Internal Finishes Flats!E6 = D4")
 
 
-def qty_wall_finish(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet) -> Derived:
-    height = _clear_height(room, params)
+def qty_wall_finish(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet,
+                    floor_height_m: float | None = None) -> Derived:
+    """Wall area = room perimeter x clear height.
+
+    Clear height is the floor-to-floor height from Room Config less the slab.
+    Both come from named places: the height from the floor this unit sits on,
+    the 0.15 from ``slab_allowance_m``.
+    """
+    height, source = _clear_height(room, params, floor_height_m)
     slab = params["slab_allowance_m"]
     value = room.perimeter_m * (height - slab)
     return derive(Quantity.of(value, "SQM"), "wall_finish",
                   f"{room.perimeter_m:g} x ({height:g} - {slab:g})",
                   [Input("perimeter_m", room.perimeter_m),
-                   Input("clear_height_m", height),
+                   Input("floor_to_floor_ht", height, source),
                    Input("slab_allowance_m", slab, "parameter")],
-                  excel_ref="Internal Finishes Flats!E8 = D4*(D1-0.15)")
+                  excel_ref="Internal Finishes Flats!E8 = D4*(D1-0.15)",
+                  note=f"height taken from the {source}")
 
 
-def qty_dado(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet) -> Derived:
+def qty_dado(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet,
+             floor_height_m: float | None = None) -> Derived:
     dado = _dado_height(room, params)
     value = room.perimeter_m * dado
     return derive(Quantity.of(value, "SQM"), "dado",
@@ -238,14 +267,16 @@ def qty_dado(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet) -> D
                   excel_ref="Internal Finishes Flats!E59 = D56*D59")
 
 
-def qty_wall_above_dado(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet) -> Derived:
-    height = _clear_height(room, params)
+def qty_wall_above_dado(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet,
+                        floor_height_m: float | None = None) -> Derived:
+    height, source = _clear_height(room, params, floor_height_m)
     dado = _dado_height(room, params)
     value = room.perimeter_m * (height - dado)
     return derive(Quantity.of(value, "SQM"), "wall_above_dado",
                   f"{room.perimeter_m:g} x ({height:g} - {dado:g})",
                   [Input("perimeter_m", room.perimeter_m),
-                   Input("clear_height_m", height), Input("dado_height_m", dado)])
+                   Input("floor_to_floor_ht", height, source),
+                   Input("dado_height_m", dado)])
 
 
 def _frame_qty(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet,
@@ -269,16 +300,18 @@ def _frame_qty(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet,
                        "pending Q-8.")
 
 
-def qty_door_frame(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet) -> Derived:
+def qty_door_frame(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet,
+                   floor_height_m: float | None = None) -> Derived:
     return _frame_qty(room, model, params, (OpeningKind.DOOR,), "door_frame")
 
 
-def qty_window_frame(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet) -> Derived:
+def qty_window_frame(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet,
+                     floor_height_m: float | None = None) -> Derived:
     return _frame_qty(room, model, params,
                       (OpeningKind.WINDOW, OpeningKind.VENTILATOR), "window_frame")
 
 
-QTY_RULES: dict[str, Callable[[UnitTypeRoom, ProjectModel, ParameterSet], Derived]] = {
+QTY_RULES: dict[str, Callable[..., Derived]] = {
     "floor_area": qty_floor_area,
     "ceiling_area": qty_ceiling_area,
     "skirting": qty_skirting,
@@ -288,6 +321,12 @@ QTY_RULES: dict[str, Callable[[UnitTypeRoom, ProjectModel, ParameterSet], Derive
     "door_frame": qty_door_frame,
     "window_frame": qty_window_frame,
 }
+
+#: The rules whose quantity depends on the floor-to-floor height.  Flooring,
+#: ceiling and skirting do not appear here, so a unit type spanning two
+#: heights yields one line for those and two for these.
+HEIGHT_DEPENDENT_RULES: frozenset[str] = frozenset(
+    {"wall_finish", "wall_above_dado"})
 
 #: Which deduction each quantity rule applies.  This is the table that was
 #: previously ~150 hand-written formulas.
@@ -318,7 +357,8 @@ class RoomQuantity:
 
 def compute_room_quantity(room: UnitTypeRoom, rule_code: str, model: ProjectModel,
                           params: ParameterSet,
-                          converter: UnitConverter | None = None) -> RoomQuantity:
+                          converter: UnitConverter | None = None,
+                          floor_height_m: float | None = None) -> RoomQuantity:
     """Gross minus deduction for one finish in one room.
 
     ``net = gross - deduction`` with the deduction positive, rather than Excel's
@@ -329,7 +369,7 @@ def compute_room_quantity(room: UnitTypeRoom, rule_code: str, model: ProjectMode
     if rule is None:
         raise QtyRuleError(f"unknown quantity rule {rule_code!r}")
 
-    gross_d = rule(room, model, params)
+    gross_d = rule(room, model, params, floor_height_m)
     gross: Quantity = gross_d.value
     deduction_d = compute_deduction(room, RULE_DEDUCTIONS.get(rule_code, "none"),
                                     model, params, gross.unit.code)

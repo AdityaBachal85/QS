@@ -76,6 +76,7 @@ async function renderRooms(main, ref, id) {
       <p><a href="#/unit-types">← all unit types</a> ·
          ${data.rooms.length} rooms · ${u.count} units in the building ·
          ${fmt.n(data.area_sqft, 2)} sq.ft each, ${fmt.n(data.total_sqft, 2)} sq.ft in total</p>
+      ${heightNote(data)}
     </div>
     <div class="card">
       <h2>Rooms <span class="sub">enter area in sq.m and perimeter; the rest is computed</span></h2>
@@ -229,4 +230,33 @@ async function renderRooms(main, ref, id) {
         <td>${fmt.money(data.amount || 0)}</td>
       </tr></tfoot>
     </table></div>`;
+}
+
+
+// Where the wall height comes from.
+//
+// Wall and dado are perimeter x (floor-to-floor height - slab), and the height
+// belongs to the floor, not to the project. A type that sits on floors of more
+// than one height genuinely has more than one wall quantity -- the take-off
+// splits it, and this line says so rather than letting one figure stand in for
+// several.
+function heightNote(data) {
+  const heights = data.heights || [];
+  if (!heights.length) return '';
+
+  const shown = fmt.n(data.floor_height_m, 2);
+  if (heights.length === 1) {
+    return `<p class="muted">Walls measured at ${shown} m floor-to-floor,
+      from Room Config, less the slab allowance.</p>`;
+  }
+  const total = heights.reduce((a, h) => a + h.count, 0);
+  const here = heights.find(h => h.height_m === data.floor_height_m);
+  const others = heights
+    .filter(h => h.height_m !== data.floor_height_m)
+    .map(h => `${fmt.n(h.height_m, 2)} m × ${h.count}`)
+    .join(', ');
+  return `<p class="muted">Rooms shown at ${shown} m floor-to-floor, which is
+    ${here ? here.count : 0} of this type's ${total} placements. It also sits on
+    floors of ${others} — the take-off measures those walls separately rather
+    than averaging them.</p>`;
 }

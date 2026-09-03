@@ -384,6 +384,25 @@ class ProjectRate:
     override_approved_by: str = ""
 
 
+@dataclass(frozen=True)
+class HeightPlacement:
+    """A unit type's presence on floors that share one floor-to-floor height.
+
+    Wall, dado and any other height-driven quantity differ between a unit on the
+    Ground Floor (4.2 m) and the same unit on a typical floor (3.1 m).  Fifteen
+    of AVS's thirty-five unit types sit on floors of more than one height --
+    every Office spans 2.9 and 4.2, and the Staircase spans all six -- so a unit
+    type does not have *a* height.  It has these.
+
+    ``height_m`` is None when the placement carries no floor to take a height
+    from, which is the case for entities counted by ``count_override``.
+    """
+
+    height_m: float | None
+    count: int
+    floors: tuple[str, ...] = ()
+
+
 # --------------------------------------------------------------------------
 # The aggregate root
 # --------------------------------------------------------------------------
@@ -465,6 +484,33 @@ class ProjectModel:
             if ut.id == unit_type_id and ut.count_override is not None:
                 return ut.count_override
         return sum(m.count for m in self.floor_unit_mix if m.unit_type_id == unit_type_id)
+
+    def height_placements(self, unit_type_id: str) -> list["HeightPlacement"]:
+        """Where this unit type sits, grouped by floor-to-floor height.
+
+        Grouped rather than listed per floor: a type on twenty-nine floors of
+        3.1 m is one placement of twenty-nine, not twenty-nine placements.  The
+        counts always sum to ``unit_count``, so folding over these can never
+        change how many units the building has -- only how tall their walls are.
+        """
+        for ut in self.unit_types:
+            if ut.id == unit_type_id and ut.count_override is not None:
+                return [HeightPlacement(None, ut.count_override, ())]
+
+        floors = {f.id: f for f in self.floors}
+        grouped: dict[float, tuple[int, list[str]]] = {}
+        for mix in self.floor_unit_mix:
+            if mix.unit_type_id != unit_type_id or not mix.count:
+                continue
+            floor = floors.get(mix.floor_id)
+            if floor is None:
+                continue
+            count, names = grouped.get(floor.floor_to_floor_ht, (0, []))
+            grouped[floor.floor_to_floor_ht] = (count + mix.count, names + [floor.name])
+        if not grouped:
+            return []
+        return [HeightPlacement(height, count, tuple(names))
+                for height, (count, names) in sorted(grouped.items())]
 
     def counts_by_classification(self) -> dict[str, int]:
         """The BHK split, derived.  Replaces Room Conf's hand-typed column lists."""
