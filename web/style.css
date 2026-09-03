@@ -25,6 +25,16 @@
   --shadow: 0 1px 2px rgba(20,30,50,.06), 0 4px 16px rgba(20,30,50,.06);
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+
+  /* A 4/8 rhythm on the dense end of the scale. Spacing was ad-hoc before, so
+     cards, toolbars and card bodies each drifted a few pixels apart. */
+  --space-1: 4px;  --space-2: 8px;   --space-3: 12px;
+  --space-4: 16px; --space-5: 24px;  --space-6: 32px;
+
+  /* One duration for hover and state, per the Swiss/minimal direction: motion
+     here confirms an interaction, it never performs. */
+  --tempo: 160ms;
+  --ease: cubic-bezier(.2, .6, .3, 1);
 }
 
 * { box-sizing: border-box; }
@@ -349,3 +359,50 @@ td.editing select {
 
 .link-quiet { color: var(--accent); text-decoration: none; font-size: 11.5px; }
 .link-quiet:hover { text-decoration: underline; }
+
+/* --- Polish pass --------------------------------------------------------
+   Applying the checks that matter for a dense professional tool: a visible
+   focus ring on everything reachable, one motion token, and motion that stops
+   when the reader asks it to. */
+
+.btn, .chip, a[data-nav], .link-quiet, select, input {
+  transition: background var(--tempo) var(--ease),
+              border-color var(--tempo) var(--ease),
+              color var(--tempo) var(--ease);
+}
+
+/* Focus must be visible on every interactive element, not only grid cells.
+   :focus-visible so a mouse click does not leave a ring behind. */
+.btn:focus-visible,
+a:focus-visible,
+select:focus-visible,
+input:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Long tables keep their header. Scrolling a 1,400-row take-off and losing
+   which column is which is how a figure gets read against the wrong label. */
+.grid-wrap { max-height: 78vh; overflow: auto; }
+.grid thead th { position: sticky; top: 0; z-index: 5; }
+
+/* Every number in a table lines up, so a column can be scanned rather than
+   read. Digits are the same width; a stray proportional figure breaks it. */
+.grid td.cell, .grid td.derived, .grid td.total, .grid tfoot td {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The one exception to "never rely on colour": these carry an icon or a word
+   as well, so the colour is reinforcement rather than the message. */
+.warn-text::before { content: ""; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

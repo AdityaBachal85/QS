@@ -59,11 +59,26 @@ class ValidationReport:
         """An estimate cannot be issued while anything is blocking."""
         return not self.blocking
 
+    #: The most each severity class can take off the score.
+    #:
+    #: A flat penalty per finding saturates: 47 warnings at 3 points each is
+    #: 141, which clamps to zero, and from there 47 warnings and 470 look
+    #: identical -- the number stops carrying information exactly when there is
+    #: most to say. Capping each class keeps blocking findings dominant while
+    #: leaving warnings able to move the figure.
+    _CAPS = ((Severity.BLOCKING, 12.0, 60.0),
+             (Severity.WARNING, 3.0, 30.0),
+             (Severity.INFO, 0.5, 10.0))
+
     def health_score(self) -> float:
-        """0-100, weighted so a big blocking error outranks a stale date."""
-        penalty = (len(self.of(Severity.BLOCKING)) * 12
-                   + len(self.of(Severity.WARNING)) * 3
-                   + len(self.of(Severity.INFO)) * 0.5)
+        """0-100, weighted so a blocking error outranks a stale date.
+
+        100 means nothing at all was found. Blocking findings can take it to 40
+        on their own; warnings and information cannot drive it below 60 between
+        them, because a pile of notes is not the same as a broken estimate.
+        """
+        penalty = sum(min(len(self.of(severity)) * each, cap)
+                      for severity, each, cap in self._CAPS)
         return max(0.0, 100.0 - penalty)
 
     def summary(self) -> str:
