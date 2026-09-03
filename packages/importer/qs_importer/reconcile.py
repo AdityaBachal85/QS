@@ -175,6 +175,52 @@ def build_lines(result: ImportResult) -> list[Line]:
         "report as measured-at-nothing until the count is settled.")
     lines.append(curtain)
 
+    # -- Cost lines and the project roll-up --------------------------------
+    from qs_engine.rules.cost_lines import compute_cost_lines, section_total
+    from qs_engine.rules.summary import project_summary
+
+    cost_lines = compute_cost_lines(model, params)
+    by_code = {s.code: s for s in model.cost_sections}
+    for code, ref, label in (("preliminaries", "Preliminary!F13", "Preliminaries"),
+                             ("amenities", "Amenities!F29", "Amenities"),
+                             ("external-development", "Infra!E13",
+                              "External Development (Infra)")):
+        section = by_code.get(code)
+        if section is None:
+            continue
+        sheet, cell = ref.split("!")
+        lines.append(Line("Cost Lines", label, wb.number(sheet, cell) or 0.0,
+                          section_total(cost_lines, section.id), ref))
+
+    area = wb.number("Construction Area", "S45") or 0.0
+    summary = project_summary(model, params, area)
+
+    #: The Substation, recovered. `Summary!D11` sums I118:I125 while the MEP
+    #: EXTERNAL band runs to row 126, so Rs 24,00,000 is computed, formatted and
+    #: totalled into the cost sheet's own I129 while reaching the project budget
+    #: through nothing. Sections here are filters, so it comes back -- and every
+    #: uplift above it moves by exactly the compounded amount.
+    substation = 2_400_000.0
+    uplift = 1 + params["escalation_pct"] + params["contingency_pct"]
+    explanation = (
+        "C-38: Cost Sheet Tower!I126 is the Substation at Rs 24,00,000. It sits "
+        "under the MEP EXTERNAL heading, which runs to row 126, but Summary!D11 "
+        "sums I118:I125 and stops one row short -- so the workbook computes it, "
+        "totals it into its own I129, and never carries it into the budget. "
+        "Nothing in the workbook compares I129 with the Summary. Sections here "
+        "are filters over the lines that name them, so it is counted.")
+
+    for label, cell, platform, delta in (
+            ("Section subtotal", "D15", summary.subtotal, substation),
+            ("Before tax (+esc, +cont)", "D18", summary.before_tax,
+             substation * uplift),
+            ("Project total (with GST)", "D20", summary.total,
+             substation * uplift * (1 + params["gst_pct"]))):
+        excel = (wb.number("Summary", cell) or 0.0) * 1e7   # the sheet is in crore
+        lines.append(Line("Project Summary", label, excel, platform,
+                          f"Summary!{cell}", expected_delta=delta,
+                          explanation=explanation))
+
     # -- Module 4 ---------------------------------------------------------
     from qs_engine.model import BuildupMethod, RateRevision
     from qs_engine.rules.rate_buildup import build_rate

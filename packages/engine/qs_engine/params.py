@@ -71,6 +71,32 @@ DEFAULT_PARAMETERS: tuple[Parameter, ...] = (
     Parameter("gst_pct", 0.18, "ratio",
               "GST applied to subtotal + escalation + contingency.",
               "Summary!D19 = D18*0.18"),
+    Parameter("hardscape_share_pct", 0.60, "ratio",
+              "Share of the landscaped area finished as hard scape. The workbook "
+              "splits it in a side calculation with 60% typed into three cells.",
+              "Infra!K7 = J7*60%"),
+    Parameter("softscape_share_pct", 0.40, "ratio",
+              "Share finished as soft scape. Must sum with hardscape to 1.",
+              "Infra!L7 = J7-K7"),
+    Parameter("barrication_height_ft", 30.0, "FT",
+              "Height of the site barrication, applied to the boundary wall run "
+              "to give its area.",
+              "Preliminary!C3 = 602.91*(30/3.28)"),
+    Parameter("project_duration_months", 36.0, "MONTH",
+              "Construction duration. The workbook types 36 into three separate "
+              "Preliminary rows, so extending the programme means finding all "
+              "three.",
+              "Preliminary!C7, C10, C11"),
+    Parameter("construction_area_sqft", 650726.7484, "SQFT",
+              "Total construction area, the denominator of every per-sq.ft "
+              "figure in the estimate. Carried from the Construction Area "
+              "sheet, which this platform does not model yet -- carpet area is "
+              "a different and much smaller number, and using it here would "
+              "understate the rate by roughly two and a half times.",
+              "Construction Area!S45"),
+    Parameter("post_construction_rate_psf", 15.0, "INR/SQFT",
+              "Post-construction cost per sq.ft of construction area.",
+              "Summary!C14, Cost Sheet Tower!C128"),
     # Deliberately undescribed: these are Q-4.  They import with their values so
     # nothing is lost, and the validation engine reports them as unnamed until a
     # QS tells us what they are.

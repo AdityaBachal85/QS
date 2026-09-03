@@ -256,6 +256,23 @@ RESOURCES: dict[str, Resource] = {
         required=("room_type_id", "finish_slot_id"),
         editable=("rate_item_id", "qty_rule", "is_applicable", "notes"),
     ),
+    "cost-sections": Resource(
+        "cost-sections", M.CostSection, "cost_sections", "cost section",
+        cascade=(Link("cost-lines", "section_id", "cost lines"),),
+        editable=("name", "code", "seq"),
+    ),
+    "cost-lines": Resource(
+        "cost-lines", M.CostLine, "cost_lines", "cost line",
+        required=("section_id",), prepare=None,
+        cascade=(Link("cost-line-qtys", "cost_line_id", "quantity components"),),
+        editable=("description", "unit", "qty", "rate_item_id", "manual_rate",
+                  "seq", "status", "exclusion_reason", "parent_id"),
+    ),
+    "cost-line-qtys": Resource(
+        "cost-line-qtys", M.CostLineQty, "cost_line_qtys", "quantity component",
+        required=("cost_line_id",),
+        editable=("label", "value", "factor", "factor_param_key"),
+    ),
     "floor_unit_mix": Resource(
         "floor_unit_mix", M.FloorUnitMix, "floor_unit_mix", "unit mix row",
         required=("floor_id", "unit_type_id"),
@@ -388,7 +405,8 @@ def _coerce(value: Any, annotation: Any, old: Any) -> Any:
     """Bring a JSON value to the type the field already holds."""
     if value is None:
         return None
-    for enum_cls in (M.FloorType, M.RoomCategory, M.OpeningKind, M.BuildupMethod):
+    for enum_cls in (M.FloorType, M.RoomCategory, M.OpeningKind,
+                     M.BuildupMethod, M.LineStatus):
         if isinstance(old, enum_cls):
             return enum_cls(value)
         if isinstance(annotation, str) and annotation.startswith(enum_cls.__name__):

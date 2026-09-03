@@ -43,6 +43,9 @@ TABLES: tuple[tuple[str, type, str | None], ...] = (
     ("rate_item", M.RateItem, "rate_items"),
     ("rate_revision", M.RateRevision, "rate_revisions"),
     ("project_rate", M.ProjectRate, "project_rates"),
+    ("cost_section", M.CostSection, "cost_sections"),
+    ("cost_line", M.CostLine, "cost_lines"),
+    ("cost_line_qty", M.CostLineQty, "cost_line_qtys"),
 )
 
 #: Added to every table so a whole project loads with one WHERE clause. Named

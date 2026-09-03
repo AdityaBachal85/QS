@@ -404,6 +404,87 @@ class HeightPlacement:
 
 
 # --------------------------------------------------------------------------
+# Cost lines -- Infra, Amenities, Preliminary, and the cost sheets
+# --------------------------------------------------------------------------
+
+@dataclass
+class CostSection:
+    """One band of the project estimate: Preliminaries, Civil, MEP, Amenities.
+
+    A section is a filter, not a range.  ``Summary!D11`` is
+    ``SUM('Cost Sheet Tower'!I118:I125)`` and the MEP EXTERNAL band runs to row
+    126, so the Substation at Rs 24,00,000 sits one row outside the total that
+    is supposed to contain it and reaches the project budget through nothing
+    (C-38).  A line belongs to a section because it says so, and no range can
+    stop one row short.
+    """
+
+    id: str
+    project_id: str
+    code: str
+    name: str
+    seq: int = 0
+    #: The workbook cell this section is reconciled against.
+    excel_ref: str = ""
+
+
+@dataclass
+class CostLine:
+    """One priced line of a cost sheet.
+
+    ``amount`` is deliberately absent: it is qty x rate, computed.
+    ``Infra!E5`` and ``E12`` are typed amounts sitting in a column where every
+    neighbour is a formula, which is the C-33 shape -- here the lump sum
+    becomes ``1 LS x Rs 15,00,000`` and the arithmetic is visible.
+
+    A heading is a line with no rate whose amount is the fold of its children,
+    so Amenities' seven groups keep their structure without storing a subtotal.
+    """
+
+    id: str
+    project_id: str
+    section_id: str
+    seq: int
+    description: str
+    unit: str = ""
+    qty: float | None = None
+    rate_item_id: str | None = None
+    manual_rate: float | None = None
+    #: Set when this line groups others beneath it.
+    parent_id: str | None = None
+    status: LineStatus = LineStatus.ACTIVE
+    #: Required when status is EXCLUDED. Nothing is removed by arithmetic (C-2).
+    exclusion_reason: str = ""
+    #: Where the figure came from, when it was carried rather than derived.
+    source_ref: str = ""
+    #: True when the quantity came from a sheet this platform has not modelled.
+    qty_carried: bool = False
+
+    @property
+    def is_heading(self) -> bool:
+        return self.rate_item_id is None and self.manual_rate is None and self.qty is None
+
+
+@dataclass
+class CostLineQty:
+    """A component of a cost line's quantity.
+
+    ``Infra!C9`` is ``=K10``, and K10 is 60% of three areas summed in a corner
+    of the sheet -- a take-off hidden in a side calculation.  Here the
+    components are rows, and the 60% is a parameter rather than a number typed
+    into a formula.
+    """
+
+    id: str
+    cost_line_id: str
+    label: str
+    value: float
+    #: Names a project parameter holding the share; falls back to ``factor``.
+    factor_param_key: str = ""
+    factor: float = 1.0
+
+
+# --------------------------------------------------------------------------
 # The aggregate root
 # --------------------------------------------------------------------------
 
@@ -431,6 +512,9 @@ class ProjectModel:
     rate_items: list[RateItem] = field(default_factory=list)
     rate_revisions: list[RateRevision] = field(default_factory=list)
     project_rates: list[ProjectRate] = field(default_factory=list)
+    cost_sections: list[CostSection] = field(default_factory=list)
+    cost_lines: list[CostLine] = field(default_factory=list)
+    cost_line_qtys: list[CostLineQty] = field(default_factory=list)
 
     # -- lookups by id -----------------------------------------------------
 
@@ -522,6 +606,17 @@ class ProjectModel:
             if n:
                 totals[ut.classification] = totals.get(ut.classification, 0) + n
         return totals
+
+    def lines_of(self, section_id: str) -> list["CostLine"]:
+        return sorted((l for l in self.cost_lines if l.section_id == section_id),
+                      key=lambda l: l.seq)
+
+    def children_of(self, cost_line_id: str) -> list["CostLine"]:
+        return sorted((l for l in self.cost_lines if l.parent_id == cost_line_id),
+                      key=lambda l: l.seq)
+
+    def qty_components(self, cost_line_id: str) -> list["CostLineQty"]:
+        return [q for q in self.cost_line_qtys if q.cost_line_id == cost_line_id]
 
     def pricing_room_type(self, room_type_id: str) -> str:
         """Which room type's finish schedule prices this one.

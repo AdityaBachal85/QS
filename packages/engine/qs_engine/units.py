@@ -28,6 +28,7 @@ class Dimension(Enum):
     MASS = "mass"
     COUNT = "count"
     LUMPSUM = "lumpsum"
+    DURATION = "duration"
     CURRENCY = "currency"
     RATIO = "ratio"
 
@@ -66,6 +67,12 @@ _UNIT_LIST: tuple[Unit, ...] = (
     Unit("TON", "Metric tonne", Dimension.MASS, 0.001),
     Unit("NOS", "Number", Dimension.COUNT, 1.0),
     Unit("LS", "Lump sum", Dimension.LUMPSUM, 1.0),
+    # Preliminaries are billed by time: 36 months of site establishment at
+    # Rs 25,000. per_base is None on the smaller units so nothing silently
+    # turns 36 months into 1,095 days -- a month is not a fixed number of them.
+    Unit("MONTH", "Month", Dimension.DURATION, 1.0),
+    Unit("WEEK", "Week", Dimension.DURATION, None),
+    Unit("DAY", "Day", Dimension.DURATION, None),
     Unit("INR", "Indian rupee", Dimension.CURRENCY, 1.0),
     Unit("PCT", "Percent", Dimension.RATIO, 1.0),
 )
@@ -86,6 +93,8 @@ _ALIASES: Mapping[str, str] = {
     "NOS": "NOS", "NO": "NOS", "NO.": "NOS", "NOS.": "NOS", "NUMBER": "NOS", "EACH": "NOS",
     "LS": "LS", "L S": "LS", "LUMPSUM": "LS", "LUMP SUM": "LS", "L.S.": "LS",
     "INR": "INR", "RS": "INR", "RS.": "INR",
+    "MONTH": "MONTH", "MONTHS": "MONTH", "MTH": "MONTH", "MNTH": "MONTH",
+    "WEEK": "WEEK", "WEEKS": "WEEK", "DAY": "DAY", "DAYS": "DAY",
     "PCT": "PCT", "%": "PCT",
 }
 

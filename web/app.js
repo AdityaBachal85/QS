@@ -154,8 +154,8 @@ window.addEventListener('hashchange', render);
 // here makes the ordering explicit instead of accidental.
 const SCREENS = [
   'overview', 'room-config', 'unit-types', 'openings', 'rates', 'mapping',
-  'takeoff', 'finish-totals', 'parameters', 'validation', 'reconciliation',
-  'audit',
+  'takeoff', 'finish-totals', 'cost-lines', 'summary', 'parameters',
+  'validation', 'reconciliation', 'audit',
 ];
 
 // Which build is on screen.

@@ -522,3 +522,64 @@ def usage(model: ProjectModel, params: ParameterSet, kind: str,
         "uses": [{"where": u.where, "detail": u.detail, "quantity": u.quantity,
                   "unit": u.unit, "amount": u.amount} for u in found.uses],
     }
+
+
+# --------------------------------------------------------------------------
+# Cost lines and the project roll-up
+# --------------------------------------------------------------------------
+
+def _priced_line_json(p) -> dict[str, Any]:
+    return {
+        "id": p.line.id, "section_id": p.line.section_id,
+        "description": p.description, "unit": p.unit, "qty": p.qty,
+        "rate": p.rate, "amount": p.amount, "status": p.status,
+        "depth": p.depth, "is_heading": p.is_heading, "message": p.message,
+        "source_ref": p.line.source_ref, "qty_carried": p.line.qty_carried,
+        "exclusion_reason": p.line.exclusion_reason,
+        "rate_item_id": p.line.rate_item_id, "manual_rate": p.line.manual_rate,
+        "qty_derivation": _derivation(p.qty_derivation) if p.qty_derivation else None,
+        "rate_derivation": _derivation(p.rate_derivation) if p.rate_derivation else None,
+    }
+
+
+def cost_lines(model: ProjectModel, params: ParameterSet) -> dict[str, Any]:
+    """Every cost line, priced, grouped by the section that owns it."""
+    from qs_engine.rules.cost_lines import (compute_cost_lines, excluded,
+                                            section_total, total_cost, unpriced)
+
+    lines = compute_cost_lines(model, params)
+    return {
+        "sections": [{
+            "id": s.id, "code": s.code, "name": s.name, "seq": s.seq,
+            "excel_ref": s.excel_ref,
+            "amount": section_total(lines, s.id),
+            "lines": [_priced_line_json(l) for l in lines
+                      if l.line.section_id == s.id],
+        } for s in sorted(model.cost_sections, key=lambda x: (x.seq, x.code))],
+        "total": total_cost(lines),
+        "excluded": [_priced_line_json(l) for l in excluded(lines)],
+        "unpriced": [_priced_line_json(l) for l in unpriced(lines)],
+    }
+
+
+def project_summary(model: ProjectModel, params: ParameterSet) -> dict[str, Any]:
+    """The number at the bottom, and everything that makes it."""
+    from qs_engine.rules.summary import project_summary as compute
+
+    # The workbook divides by construction area (Construction Area!S45), not
+    # carpet area -- they differ by about 2.5x, so the wrong one here would
+    # quietly report a rate that looks plausible and is not.
+    s = compute(model, params, params["construction_area_sqft"])
+    return {
+        "sections": [{"id": x.id, "code": x.code, "name": x.name,
+                      "amount": x.amount, "lines": x.lines,
+                      "carried": x.carried, "is_carried": x.is_carried,
+                      "excel_ref": x.excel_ref} for x in s.sections],
+        "subtotal": s.subtotal,
+        "uplifts": [{"code": u.code, "label": u.label, "rate": u.rate,
+                     "amount": u.amount, "basis": u.basis} for u in s.uplifts],
+        "before_tax": s.before_tax, "tax": s.tax, "total": s.total,
+        "construction_area_sqft": s.construction_area_sqft,
+        "rate_per_sqft": s.rate_per_sqft,
+        "derivation": _derivation(s.derivation) if s.derivation else None,
+    }
