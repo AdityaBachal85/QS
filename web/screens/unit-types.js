@@ -82,6 +82,21 @@ async function renderRooms(main, ref, id) {
       <h2>Rooms <span class="sub">enter area in sq.m and perimeter; the rest is computed</span></h2>
       <div id="grid"></div>
     </div>
+    <div class="card" id="kitchenCard" hidden>
+      <h2>Kitchen platforms
+        <span class="sub">the counters a kitchen's tiling is measured along</span></h2>
+      <div class="card-body" style="padding-top:6px">
+        <p class="muted" style="margin-top:0">A kitchen's dado does not run round
+        the room — it runs along the counters. Enter the four figures and the two
+        dado areas appear beside them:
+        <strong>above = (main × above) + (service × above)</strong>,
+        <strong>below = (main × below) + (service × below)</strong>. One term per
+        counter, added — not (main + service) × height, so a service counter can
+        take its own height. They carry straight into
+        <em>Finishes, quantities and cost</em> below.</p>
+      </div>
+      <div id="kitchen"></div>
+    </div>
     <div class="card">
       <h2>Openings per room <span class="sub">what each room's deductions are folded from</span></h2>
       <div id="openings"></div>
@@ -160,6 +175,14 @@ async function renderRooms(main, ref, id) {
     },
   });
 
+  // -- the counters, between the rooms and their openings -----------------
+  //
+  // Only shown where something in this unit type is priced off a counter, so a
+  // unit type with no kitchen does not grow an empty card. The two dado areas
+  // beside the entries are computed by the engine and come down with the
+  // payload -- the browser multiplies nothing (non-negotiable 8).
+  await renderKitchen(id, u);
+
   // -- openings, flattened one row per (room, opening) --------------------
   const openingRows = data.rooms.flatMap(room =>
     room.openings.map(o => ({ ...o, room_label: room.label, room_id: room.id })));
@@ -219,7 +242,7 @@ async function renderRooms(main, ref, id) {
         <th class="total" style="min-width:112px">Per unit</th>
         <th class="total" style="min-width:124px">All ${u.count} units</th>
       </tr></thead>
-      <tbody>${data.rooms.flatMap(room => {
+      <tbody>${data.rooms.flatMap((room, ri) => {
         const rows = (room.costs || []).length
           ? room.costs.map(c => ({ ...c, _label: c.finish }))
           : room.quantities.filter(q => q.gross || q.error)
@@ -229,22 +252,32 @@ async function renderRooms(main, ref, id) {
                            status: 'no_rate', deduction_rule: q.deduction_rule,
                            message: q.error || 'this room type has no finish schedule' }));
         return rows.map((r, i) => {
-          const ded = byRoomRule[`${room.id}|${r.rule}`];
           const dedRule = r.deduction_rule
             || (room.quantities.find(q => q.rule === r.rule) || {}).deduction_rule;
+          // Every figure below is calculated, so every one of them opens its
+          // working: what rule, what expression, which inputs and where each
+          // came from, what the deduction is folded from opening by opening,
+          // and the workbook cell it replaces.
+          const at = (what) => `data-cost="${ri}:${i}:${what}"`;
+          const cell = (what, inner, cls) =>
+            `<td class="derived ${cls || ''} clickable" ${at(what)}
+                title="Click for the working">${inner}</td>`;
           return `
           <tr>
             <td class="label left">${i === 0 ? escapeHtml(room.label) : ''}</td>
             <td class="label left">${escapeHtml(r._label)}</td>
-            <td class="derived">${r.gross === null ? '—' : fmt.n(r.gross, 2)}</td>
-            <td class="derived">${r.deduction ? '−' + fmt.n(r.deduction, 2) : '—'}</td>
+            ${cell('gross', r.gross === null ? '—' : fmt.n(r.gross, 2))}
+            ${cell('deduction', r.deduction ? '−' + fmt.n(r.deduction, 2) : '—')}
             <td class="derived left"><span class="muted">${escapeHtml(DEDUCTS[dedRule] || '—')}</span></td>
-            <td class="derived">${r.net === null ? '—' : fmt.n(r.net, 2)}</td>
+            ${cell('net', r.net === null ? '—' : fmt.n(r.net, 2))}
             <td class="derived left">${escapeHtml(r.unit || '')}</td>
-            <td class="derived ${r.rate === null ? 'missing' : ''}">${
-              r.rate === null ? '<span class="tag bad">no rate</span>' : '₹' + fmt.n(r.rate, 2)}</td>
-            <td class="derived total">${r.status === 'priced' ? fmt.money(r.amount_per_unit) : '—'}</td>
-            <td class="derived total">${r.status === 'priced' ? fmt.money(r.total_amount) : '—'}</td>
+            ${cell('rate', r.rate === null
+              ? '<span class="tag bad">no rate</span>' : '₹' + fmt.n(r.rate, 2),
+              r.rate === null ? 'missing' : '')}
+            ${cell('amount_per_unit',
+              r.status === 'priced' ? fmt.money(r.amount_per_unit) : '—', 'total')}
+            ${cell('total_amount',
+              r.status === 'priced' ? fmt.money(r.total_amount) : '—', 'total')}
           </tr>`;
         });
       }).join('')}
@@ -256,6 +289,235 @@ async function renderRooms(main, ref, id) {
         <td>${fmt.money(data.amount || 0)}</td>
       </tr></tfoot>
     </table></div>`;
+
+  // Every calculated cell on this table opens its working. The table is built
+  // as HTML rather than through createGrid -- nothing here is editable -- so
+  // the clicks are delegated from the card.
+  const costRows = data.rooms.map(room => {
+    const rows = (room.costs || []).length
+      ? room.costs.map(c => ({ ...c, _label: c.finish }))
+      : room.quantities.filter(q => q.gross || q.error)
+          .map(q => ({ _label: q.rule, rule: q.rule, unit: q.unit, gross: q.gross,
+                       deduction: q.deduction, net: q.net, rate: null,
+                       gross_derivation: q.gross_derivation,
+                       deduction_derivation: q.deduction_derivation,
+                       status: 'no_rate', deduction_rule: q.deduction_rule,
+                       message: q.error || 'this room type has no finish schedule' }));
+    return { room, rows };
+  });
+
+  document.getElementById('qty').addEventListener('click', (e) => {
+    const td = e.target.closest('[data-cost]');
+    if (!td) return;
+    const [ri, i, what] = td.dataset.cost.split(':');
+    const entry = costRows[Number(ri)];
+    if (!entry) return;
+    showCostWorking(entry.room, entry.rows[Number(i)], what, u, data);
+  });
+}
+
+
+// The working behind one figure on "Finishes, quantities and cost".
+//
+// Which working depends on which cell: the gross has its own derivation, the
+// deduction is a fold over this room's openings, the rate is a build-up from
+// the library, and the two money columns are a multiplication of things that
+// each have their own working -- so those show the multiplication and name
+// both sides.
+function showCostWorking(room, r, what, u, data) {
+  if (!r) return;
+  const where = `${room.label} — ${r._label}`;
+  const note = r.message
+    ? `<div class="deriv-note">${escapeHtml(r.message)}</div>` : '';
+  const usage = `
+    <h4 class="deriv-h">Where this goes</h4>
+    <div class="deriv-note">Into the finishing take-off for ${escapeHtml(u.code)},
+      ${r.unit_count ?? u.count} unit${(r.unit_count ?? u.count) === 1 ? '' : 's'}
+      of it, and from there into the project total. Change the room's area,
+      perimeter or openings above and this figure moves by itself — nothing here
+      is stored.</div>`;
+
+  if (what === 'gross') {
+    showDerivation(`${where} — gross`, r.gross, r.gross_derivation,
+      { unit: r.unit, extra: note + usage });
+    return;
+  }
+
+  if (what === 'deduction') {
+    const d = r.deduction_derivation;
+    if (!d || !r.deduction) {
+      openPanel(`${where} — deduction`, `<div class="deriv-note">Nothing is
+        deducted from this quantity. ${escapeHtml(r._label)} is measured as
+        built.</div>`);
+      return;
+    }
+    showDerivation(`${where} — deduction`, r.deduction, d, {
+      unit: r.unit,
+      extra: `<div class="deriv-note">A fold over the openings actually in this
+        room, not a hand-picked list of cells (C-13). Each one is named above
+        with the count it contributes.</div>` + usage,
+    });
+    return;
+  }
+
+  if (what === 'net') {
+    showDerivation(`${where} — net`, r.net, r.gross_derivation, {
+      unit: r.unit,
+      extra: `
+        <h4 class="deriv-h">Less this room's own openings</h4>
+        <div class="deriv-expr">${fmt.n(r.gross, 3)} − ${fmt.n(r.deduction || 0, 3)}
+          = ${fmt.n(r.net, 3)} ${escapeHtml(r.unit || '')}</div>` + note + usage,
+    });
+    return;
+  }
+
+  if (what === 'rate') {
+    if (r.rate === null || r.rate === undefined) {
+      openPanel(`${where} — rate`, `<div class="deriv-note">${escapeHtml(
+        r.message || 'This finish is measured but carries no price, so it '
+        + 'reaches no total. It is listed at zero rather than left out, '
+        + 'because measured work presented as absent is how Rs 65.5 lakh of '
+        + 'false ceiling disappeared from the workbook (C-11).')}</div>`);
+      return;
+    }
+    showDerivation(`${where} — rate`, r.rate, r.rate_derivation, {
+      format: v => '₹' + fmt.n(v, 2),
+      extra: `<div class="deriv-note">${escapeHtml(r.rate_description || '')} —
+        from the <a href="#/rates">Rate Library</a>, linked to this room type by
+        <a href="#/mapping">room type pricing</a>. Change the build-up there and
+        every room priced on it moves.</div>`,
+    });
+    return;
+  }
+
+  // The two money columns: a multiplication, with both sides named.
+  //
+  // The count is the LINE's, not the unit type's. A type sitting on floors of
+  // more than one height splits into a line per height, each covering only the
+  // units at that height — showing the type's total here would print a
+  // multiplication that is not the one that produced the figure.
+  const perUnit = what === 'amount_per_unit';
+  const value = perUnit ? r.amount_per_unit : r.total_amount;
+  const count = r.unit_count ?? u.count;
+  const split = count !== u.count;
+  openPanel(`${where} — ${perUnit ? 'per unit' : `${count} unit${
+      count === 1 ? '' : 's'}`}`, `
+    <div class="deriv-value">${fmt.money(value)}</div>
+    <div class="muted">${perUnit ? 'quantity x rate'
+      : 'quantity x rate x units this line covers'}</div>
+    <div class="deriv-expr">${fmt.n(r.net, 3)} ${escapeHtml(r.unit || '')} ×
+      ₹${fmt.n(r.rate || 0, 2)}${perUnit ? '' : ` × ${count}`} = ${
+      fmt.money(value)}</div>
+    ${split ? `<div class="deriv-note">${escapeHtml(u.code)} has ${u.count}
+      units in the building, and this line covers ${count} of them${
+      r.floor_scope ? ` — ${escapeHtml(r.floor_scope)}` : ''}${
+      r.floor_height_m ? `, measured at ${fmt.n(r.floor_height_m, 2)} m
+      floor-to-floor` : ''}. The rest sit on floors of a different height and
+      are measured separately rather than averaged into one wall.</div>` : ''}
+    <h4 class="deriv-h">Built from</h4>
+    <div class="deriv-inputs">
+      <div class="deriv-input">
+        <div><div class="n">net quantity</div>
+          <div class="deriv-src">${escapeHtml(r.gross_derivation
+            ? r.gross_derivation.expression : 'measured on this room')}, less
+            this room's openings</div></div>
+        <div class="v">${fmt.n(r.net, 3)}</div>
+      </div>
+      <div class="deriv-input">
+        <div><div class="n">rate</div>
+          <div class="deriv-src">${escapeHtml(r.rate_description || 'rate library')}</div></div>
+        <div class="v">${fmt.n(r.rate || 0, 2)}</div>
+      </div>
+      ${perUnit ? '' : `
+      <div class="deriv-input">
+        <div><div class="n">units of ${escapeHtml(u.code)} this line covers</div>
+          <div class="deriv-src">from the floor matrix in Room Config, counted —
+            never typed${r.floor_scope ? `; ${escapeHtml(r.floor_scope)}` : ''}</div></div>
+        <div class="v">${count}</div>
+      </div>`}
+    </div>
+    <div class="deriv-note">The multiplication goes through the unit system: a
+      rate per Nos. meeting a square-metre quantity raises rather than producing
+      a plausible number (C-35).</div>` + usage);
+}
+
+
+async function renderKitchen(unitTypeId, u) {
+  const data = await api.get(
+    `/unit-types/${encodeURIComponent(unitTypeId)}/kitchen-platforms`);
+  if (!data.rooms.length) return;
+  document.getElementById('kitchenCard').hidden = false;
+
+  const entered = (v) => (v === null || v === undefined
+    ? '<span class="muted" title="not entered">—</span>' : fmt.n(v, 2));
+
+  createGrid(document.getElementById('kitchen'), {
+    columns: [
+      { key: 'room_label', label: 'Room', kind: 'label', width: '170px' },
+      { key: 'main_platform_m', label: 'Main platform', unit: 'm', kind: 'input',
+        dp: 2, width: '120px', nullable: true, render: entered,
+        title: 'The main counter run, measured. Entered, not derived.' },
+      { key: 'service_platform_m', label: 'Service platform', unit: 'm',
+        kind: 'input', dp: 2, width: '132px', nullable: true, render: entered,
+        title: 'The workbook derives this as main − 0.9. That is a habit frozen '
+             + 'into a formula, and an L-shaped service run does not obey it, '
+             + 'so here it is entered.' },
+      { key: 'dado_above_m', label: 'Above ht', unit: 'm', kind: 'input',
+        dp: 2, width: '104px', nullable: true, render: entered,
+        title: 'Tiling height above the counter.' },
+      { key: 'dado_below_m', label: 'Below ht', unit: 'm', kind: 'input',
+        dp: 2, width: '104px', nullable: true, render: entered,
+        title: 'Tiling height below it — the counter\u2019s own height.' },
+      { key: 'dado_above', label: 'Dado above', unit: 'sq.m', kind: 'derived',
+        dp: 2, width: '116px',
+        title: '(main × above) + (service × above). Click for the working.',
+        render: v => (v === null || v === undefined
+          ? '<span class="muted">—</span>' : fmt.n(v, 2)) },
+      { key: 'dado_below', label: 'Dado below', unit: 'sq.m', kind: 'derived',
+        dp: 2, width: '116px',
+        title: '(main × below) + (service × below). Click for the working.',
+        render: v => (v === null || v === undefined
+          ? '<span class="muted">—</span>' : fmt.n(v, 2)) },
+    ],
+    rows: data.rooms,
+    rowKey: r => r.unit_type_room_id,
+    reload: refresh,
+    emptyMessage: 'Nothing in this unit type is priced off a counter.',
+    rowName: row => `the counters in ${row.room_label}`,
+    // A room has the counters it has; there is no second set to add, and
+    // deleting one would make the kitchen unmeasured rather than free.
+    onCommit: async (row, col, value) => {
+      if (row.id) {
+        return api.send('PATCH', `/collections/kitchen-platforms/${row.id}`,
+                        { [col.key]: value });
+      }
+      // First figure typed against a room that has none yet.
+      return api.post('/collections/kitchen-platforms', {
+        unit_type_room_id: row.unit_type_room_id, [col.key]: value });
+    },
+    onDerivedClick: (row, col) => {
+      const which = col.key === 'dado_above' ? 'above' : 'below';
+      const derivation = row[`${col.key}_derivation`];
+      if (!derivation) {
+        openPanel(`${row.room_label} — dado ${which} the counter`,
+          `<div class="deriv-note">${escapeHtml(row.message
+            || 'No counters entered for this room yet.')}</div>`);
+        return;
+      }
+      showDerivation(`${row.room_label} — dado ${which} the counter`,
+        row[col.key], derivation, {
+          unit: 'sq.m',
+          extra: `<div class="deriv-note">Each counter is measured and the
+            results added. Written <strong>(main × height) + (service × height)</strong>
+            rather than (main + service) × height: the two agree today, and only
+            the first survives a service counter taking a different height.
+            This quantity is what <em>Dado${which === 'below'
+              ? ' Below Kitchen Platform' : ''}</em> costs in the table below,
+            and the plaster on this wall is what is left once both dado areas
+            are taken off — you do not plaster behind the tiles.</div>`,
+        });
+    },
+  });
 }
 
 

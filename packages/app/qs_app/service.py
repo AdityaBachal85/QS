@@ -208,6 +208,69 @@ def room_quantities(model: ProjectModel, params: ParameterSet,
     return out
 
 
+def kitchen_platforms(model: ProjectModel, params: ParameterSet,
+                      unit_type_id: str) -> dict[str, Any]:
+    """The counters in one unit type's rooms, and what they measure.
+
+    One row per room that is priced for a counter, whether or not its runs have
+    been entered yet.  A room with no counters shows blank rather than zero and
+    says so, because a kitchen with no counters is unmeasured, not free.
+
+    The two dado areas sit beside the four entries so the effect of typing is
+    visible in place.  They are computed here by the engine, not in the
+    browser: the same call the take-off makes, so the tab and the cost cannot
+    disagree.
+    """
+    from qs_engine.rules.room_qty import (MissingKitchenPlatformError,
+                                          QTY_RULES)
+
+    slots = {s.id: s for s in model.finish_slots}
+    counter_rules = {"kitchen_platform", "service_platform"}
+
+    def measures_off_a_counter(room_type_id: str) -> set[str]:
+        """The counter-driven rules this room type is priced for."""
+        found = set()
+        for spec in model.room_finish_specs:
+            if spec.room_type_id != room_type_id or not spec.is_applicable:
+                continue
+            slot = slots.get(spec.finish_slot_id)
+            rule = spec.qty_rule or (slot.qty_rule if slot else "")
+            if rule in counter_rules or rule.startswith("dado_"):
+                found.add(rule)
+        return found
+
+    rows = []
+    for room in model.rooms_of(unit_type_id):
+        priced_for = measures_off_a_counter(room.room_type_id)
+        if not (priced_for & counter_rules):
+            continue
+        platform = model.kitchen_platform(room.id)
+        entry: dict[str, Any] = {
+            "id": platform.id if platform else None,
+            "unit_type_room_id": room.id,
+            "room_label": room.label or model.room_type(room.room_type_id).name,
+            "room_type": model.room_type(room.room_type_id).name,
+            "count_per_unit": room.count_per_unit,
+            "main_platform_m": platform.main_platform_m if platform else None,
+            "service_platform_m": platform.service_platform_m if platform else None,
+            "dado_above_m": platform.dado_above_m if platform else None,
+            "dado_below_m": platform.dado_below_m if platform else None,
+            "priced_for": sorted(priced_for),
+        }
+        for rule, key in (("dado_above_platform", "dado_above"),
+                          ("dado_below_platform", "dado_below")):
+            try:
+                derived = QTY_RULES[rule](room, model, params)
+                entry[key] = derived.value.value
+                entry[f"{key}_derivation"] = _derivation(derived)
+            except MissingKitchenPlatformError as exc:
+                entry[key] = None
+                entry[f"{key}_derivation"] = None
+                entry.setdefault("message", str(exc))
+        rows.append(entry)
+    return {"rooms": rows}
+
+
 def openings(model: ProjectModel) -> dict[str, Any]:
     """The door and window schedule -- a query, not a bounded range (C-18)."""
     def lines(kinds):

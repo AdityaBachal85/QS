@@ -177,6 +177,31 @@ def _prepare_room_opening(model: M.ProjectModel, payload: dict) -> dict:
     }
 
 
+def _prepare_kitchen_platform(model: M.ProjectModel, payload: dict) -> dict:
+    """The counters in one room.
+
+    One set per room: a room has the counters it has, and a second row would
+    mean two answers to one question with nothing saying which is right.
+    """
+    room_id = payload.get("unit_type_room_id")
+    if not room_id:
+        raise CrudError("counters belong to a room, so one has to be named")
+    model.room(room_id)
+    if model.kitchen_platform(room_id) is not None:
+        raise CrudError(
+            f"{model.room(room_id).label or 'that room'} already has its "
+            f"counters. Change the runs on the row that is there rather than "
+            f"adding a second set.")
+    return {
+        "id": new_id(model, room_id, "platform"),
+        "unit_type_room_id": room_id,
+        "main_platform_m": float(payload.get("main_platform_m") or 0),
+        "service_platform_m": float(payload.get("service_platform_m") or 0),
+        "dado_above_m": float(payload.get("dado_above_m") or 0),
+        "dado_below_m": float(payload.get("dado_below_m") or 0),
+    }
+
+
 def _prepare_rate_item(model: M.ProjectModel, payload: dict) -> dict:
     description = payload.get("description") or "New rate"
     return {
@@ -219,6 +244,17 @@ RESOURCES: dict[str, Resource] = {
         editable=("label", "room_type_id", "seq", "count_per_unit",
                   "carpet_area_sqm", "perimeter_m", "clear_height_m",
                   "dado_height_m"),
+    ),
+    "kitchen-platforms": Resource(
+        "kitchen-platforms", M.KitchenPlatform, "kitchen_platforms",
+        "kitchen platform",
+        required=("unit_type_room_id",), prepare=_prepare_kitchen_platform,
+        # All four are entered. The workbook derives the service run as
+        # `E171-0.9`, which is a rule of thumb frozen into a formula -- an
+        # L-shaped service counter does not obey it. The two dado areas are
+        # computed from these and are deliberately not here.
+        editable=("main_platform_m", "service_platform_m",
+                  "dado_above_m", "dado_below_m"),
     ),
     "opening-types": Resource(
         "opening-types", M.OpeningType, "opening_types", "opening type",

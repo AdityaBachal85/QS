@@ -457,6 +457,21 @@ def get_unit_types() -> list[dict[str, Any]]:
     return service.unit_types(model, params)
 
 
+@app.get("/api/unit-types/{unit_type_id}/kitchen-platforms")
+def get_kitchen_platforms(unit_type_id: str) -> dict[str, Any]:
+    """The counters in this unit type's rooms.
+
+    Its own call rather than part of the rooms payload: the rooms response is
+    already the largest on the site, and a kitchen tab that is not open should
+    not be costing every other screen bytes.
+    """
+    model, params = state.require()
+    try:
+        return service.kitchen_platforms(model, params, unit_type_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @app.get("/api/unit-types/{unit_type_id}/rooms")
 def get_unit_rooms(unit_type_id: str) -> dict[str, Any]:
     model, params = state.require()

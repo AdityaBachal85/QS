@@ -39,6 +39,7 @@ TABLES: tuple[tuple[str, type, str | None], ...] = (
     ("unit_type_room", M.UnitTypeRoom, "unit_type_rooms"),
     ("finish_slot", M.FinishSlot, "finish_slots"),
     ("room_finish_spec", M.RoomFinishSpec, "room_finish_specs"),
+    ("kitchen_platform", M.KitchenPlatform, "kitchen_platforms"),
     ("opening_type", M.OpeningType, "opening_types"),
     ("room_opening", M.RoomOpening, "room_openings"),
     ("rate_item", M.RateItem, "rate_items"),

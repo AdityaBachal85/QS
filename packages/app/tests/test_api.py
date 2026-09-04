@@ -273,3 +273,96 @@ def test_a_seeded_database_prices_every_opening(client):
     assert costs["total"] > 0
     priced = [l for l in costs["lines"] if l["rate"]]
     assert len(priced) == len(costs["lines"]), "every type carries a rate"
+
+
+# -- the kitchen counters ---------------------------------------------------
+
+def test_the_counters_tab_shows_only_rooms_priced_off_a_counter(client):
+    """A unit type with no kitchen does not grow an empty card."""
+    types = client.get("/api/unit-types").json()
+    flat = next(t for t in types if t["code"] == "Flat 7")
+    data = client.get(
+        f"/api/unit-types/{flat['id']}/kitchen-platforms").json()
+    assert len(data["rooms"]) == 1
+    row = data["rooms"][0]
+    assert row["room_type"] == "Kitchen"
+    assert set(row["priced_for"]) >= {"kitchen_platform", "service_platform"}
+
+
+def test_the_tab_computes_both_dado_areas_beside_the_entries(client):
+    """(main x above) + (service x above), from the engine, not the browser."""
+    types = client.get("/api/unit-types").json()
+    flat = next(t for t in types if t["code"] == "Flat 7")
+    row = client.get(
+        f"/api/unit-types/{flat['id']}/kitchen-platforms").json()["rooms"][0]
+
+    assert row["dado_above"] == pytest.approx(
+        (row["main_platform_m"] + row["service_platform_m"]) * row["dado_above_m"])
+    assert row["dado_above_derivation"]["expression"] == "(3.52 x 1.5) + (2.62 x 1.5)"
+    assert row["dado_below_derivation"]["expression"] == "(3.52 x 0.9) + (2.62 x 0.9)"
+
+
+def test_typing_a_counter_run_moves_the_cost_with_no_linking_step(client):
+    types = client.get("/api/unit-types").json()
+    flat = next(t for t in types if t["code"] == "Flat 7")
+    row = client.get(
+        f"/api/unit-types/{flat['id']}/kitchen-platforms").json()["rooms"][0]
+
+    def kitchen_costs():
+        rooms = client.get(f"/api/unit-types/{flat['id']}/rooms").json()["rooms"]
+        room = next(r for r in rooms if r["id"] == row["unit_type_room_id"])
+        return {c["finish"]: c for c in room["costs"]}
+
+    before = kitchen_costs()
+    original = row["main_platform_m"]
+    client.patch(f"/api/collections/kitchen-platforms/{row['id']}",
+                     json={"main_platform_m": original + 1.0})
+    after = kitchen_costs()
+
+    assert after["Kitchen Platform"]["net"] == pytest.approx(original + 1.0)
+    # The dado above and below both move by the extra run times their heights.
+    assert after["Dado"]["net"] - before["Dado"]["net"] == pytest.approx(
+        1.0 * row["dado_above_m"])
+    assert (after["Dado Below Kitchen Platform"]["net"]
+            - before["Dado Below Kitchen Platform"]["net"]) == pytest.approx(
+        1.0 * row["dado_below_m"])
+    # And the plaster falls by exactly the extra tiling: you do not plaster
+    # behind the tiles.
+    walls_before = sum(c["net"] for f, c in before.items() if f == "Wall finishes plaster")
+    walls_after = sum(c["net"] for f, c in after.items() if f == "Wall finishes plaster")
+    assert walls_after < walls_before
+
+    client.patch(f"/api/collections/kitchen-platforms/{row['id']}",
+                     json={"main_platform_m": original})
+
+
+def test_a_room_cannot_carry_two_sets_of_counters(client):
+    """A room has the counters it has; two rows would be two answers."""
+    types = client.get("/api/unit-types").json()
+    flat = next(t for t in types if t["code"] == "Flat 7")
+    row = client.get(
+        f"/api/unit-types/{flat['id']}/kitchen-platforms").json()["rooms"][0]
+    refused = client.post("/api/collections/kitchen-platforms",
+                              json={"unit_type_room_id": row["unit_type_room_id"]})
+    assert refused.status_code == 400
+    assert "already has its counters" in refused.json()["detail"]
+
+
+def test_a_room_with_no_counters_reports_rather_than_showing_zero(client):
+    """The three office Pantries whose size matches no take-off block."""
+    types = client.get("/api/unit-types").json()
+    office = next(t for t in types if t["code"] == "Office 2")
+    row = client.get(
+        f"/api/unit-types/{office['id']}/kitchen-platforms").json()["rooms"][0]
+    assert row["id"] is None
+    assert row["dado_above"] is None and row["dado_below"] is None
+    assert "no counters entered" in row["message"]
+
+
+def test_the_counters_survive_a_round_trip_through_the_store(client):
+    from qs_app import server
+
+    saved = server.state.store.load("avs")
+    assert len(saved.kitchen_platforms) == 17
+    assert all(p.main_platform_m or p.service_platform_m
+               for p in saved.kitchen_platforms)
