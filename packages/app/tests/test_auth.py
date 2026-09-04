@@ -73,7 +73,43 @@ def test_the_platform_is_open_until_somebody_creates_an_account(app_client):
                             json={"label": "Renamed while open"}).status_code == 200
 
 
-def test_the_first_account_closes_it_and_is_an_admin(app_client):
+@pytest.fixture
+def accounts_required():
+    """Turn the sign-in gate on for one test.
+
+    It is off by default (``server.ACCOUNTS_REQUIRED``), at the user's request.
+    The accounts underneath it are kept, so what guards them is kept too --
+    switched on here rather than deleted, which is what tells us the flag is
+    the only thing standing between the platform and a working sign-in.
+    """
+    from qs_app import server
+    server.ACCOUNTS_REQUIRED = True
+    try:
+        yield
+    finally:
+        server.ACCOUNTS_REQUIRED = False
+
+
+def test_the_gate_is_off_so_nobody_is_asked_to_sign_in(app_client):
+    """What "remove the sign in feature" means, asserted.
+
+    Not that the accounts are gone -- that a write goes through with nobody
+    signed in and nothing asked for.
+    """
+    me = app_client.get("/api/me").json()
+    assert me["accounts_required"] is False
+    assert me["open_access"] is True
+
+    app_client.post("/api/users", json={"name": "Aditya", "email": "a@b.com",
+                                        "password": "a-good-password"})
+    unit = next(u for u in app_client.get("/api/unit-types").json() if u["rooms"])
+    room = app_client.get(f"/api/unit-types/{unit['id']}/rooms").json()["rooms"][0]
+    written = app_client.patch(f"/api/collections/rooms/{room['id']}",
+                               json={"label": "Went straight through"})
+    assert written.status_code == 200, "an account exists and the write still goes"
+
+
+def test_the_first_account_closes_it_and_is_an_admin(app_client, accounts_required):
     created = app_client.post("/api/users", json={
         "name": "Aditya", "email": "aditya@dbotrealty.com",
         "password": "a-good-password"}).json()
@@ -143,7 +179,7 @@ def test_signing_in_lets_the_write_through_and_names_the_person(app_client):
     assert entries[0]["actor"] != "local"
 
 
-def test_a_reviewer_may_read_but_not_write(app_client):
+def test_a_reviewer_may_read_but_not_write(app_client, accounts_required):
     """A reviewer's job is to disagree with a number, not to replace it."""
     _sign_up_and_in(app_client, role="reviewer", email="ravi@b.com")
 
