@@ -509,3 +509,29 @@ def test_the_report_says_what_the_change_would_be_worth(client):
                                           rel=0.02)
     assert abs(d["gap_partitioned"]) < abs(d["gap_now"]), (
         "the proposal should move the take-off toward the workbook")
+
+
+def test_the_build_stamp_says_whether_it_is_the_current_one(client):
+    """A hash on its own says nothing.
+
+    The Kitchen platforms tab read as "missing" for a week because the running
+    checkout was behind and the only clue was a seven-character hash in the
+    corner. The version route now carries how far behind it is, so the screen
+    can say so instead of leaving somebody to guess.
+    """
+    v = client.get("/api/version").json()
+    assert "behind" in v, "the stamp cannot say whether it is current"
+    assert isinstance(v["behind"], int) and v["behind"] >= 0
+    assert "commit" in v and "committed_at" in v
+
+
+def test_being_behind_is_only_claimed_when_it_is_certain(client):
+    """Wrong in the safe direction: silence when it cannot tell.
+
+    The count is read from refs already on disk so it works with no network,
+    which means it can be stale. Reporting 0 when there is something new is the
+    right way to be wrong -- it never nags, and when it speaks it is certain.
+    """
+    from qs_app.server import commits_behind
+
+    assert commits_behind() >= 0          # never negative, never raises

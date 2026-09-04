@@ -35,6 +35,8 @@ seed:
 run: seed
 	@echo ""
 	@echo "  DBOT QS Platform  ->  http://localhost:$(PORT)"
+	@echo "  build $$(git log -1 --format='%h  %cs  %s' 2>/dev/null || echo unknown)"
+	@behind=$$(git rev-list --count HEAD..@{upstream} 2>/dev/null || echo 0); 	if [ "$$behind" -gt 0 ]; then 	  echo ""; 	  echo "  ---------------------------------------------------------------"; 	  echo "  THIS IS NOT THE LATEST BUILD. You are $$behind commit(s) behind."; 	  echo "  Anything added since will not be on screen. Stop this, then:"; 	  echo "      git pull && make run"; 	  echo "  ---------------------------------------------------------------"; 	fi
 	@echo ""
 	$(PY) -m uvicorn qs_app.server:app --host 127.0.0.1 --port $(PORT) $(RELOAD)
 

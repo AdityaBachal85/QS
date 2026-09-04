@@ -189,8 +189,20 @@ async function showBuild() {
     const v = await api.get('/version');
     const el = document.getElementById('buildStamp');
     if (!el || !v.commit || v.commit === 'unknown') return;
+
+    // A hash on its own says nothing. What a person needs to know is whether
+    // what they are looking at is the current build -- the Kitchen platforms
+    // tab was "missing" for a week because the answer was no and nothing on
+    // the screen said so.
+    if (v.behind > 0) {
+      el.innerHTML = `<span class="chip warn" title="Running ${v.commit} from ${
+        v.committed_at}. Stop the server, run: git pull &amp;&amp; make run"
+        >${v.behind} commit${v.behind === 1 ? '' : 's'} behind — git pull</span>`;
+      return;
+    }
     el.innerHTML = `<span class="chip mute" title="${v.branch || ''} · ${
-      v.committed_at || ''}">build ${v.commit}</span>`;
+      v.committed_at || ''} · up to date">build ${v.commit} · ${
+      v.committed_at || ''}</span>`;
   } catch { /* a missing stamp must never stop the app */ }
 }
 

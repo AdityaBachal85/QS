@@ -68,7 +68,8 @@ def build_stamp() -> dict[str, Any]:
     """
     if getattr(build_stamp, "_cached", None) is None:
         import subprocess
-        stamp = {"commit": "unknown", "committed_at": "", "branch": ""}
+        stamp = {"commit": "unknown", "committed_at": "", "branch": "",
+                 "behind": 0}
         try:
             out = subprocess.run(
                 ["git", "-C", str(ROOT), "log", "-1", "--format=%h%n%cs%n%D"],
@@ -78,11 +79,36 @@ def build_stamp() -> dict[str, Any]:
             for ref in refs.split(", "):
                 if ref.startswith("HEAD -> "):
                     branch = ref[len("HEAD -> "):]
-            stamp = {"commit": commit, "committed_at": date, "branch": branch}
+            stamp = {"commit": commit, "committed_at": date, "branch": branch,
+                     "behind": commits_behind()}
         except Exception:
             pass
         build_stamp._cached = stamp
     return dict(build_stamp._cached)
+
+
+def commits_behind() -> int:
+    """How many commits this checkout is behind what it is tracking.
+
+    A running app that quietly serves last week's code is the most expensive
+    kind of confusion: the screen disagrees with what was built and there is
+    nothing on it saying why. The Kitchen platforms tab was missing for exactly
+    this reason and the only clue was a seven-character hash in the corner that
+    means nothing on its own.
+
+    Read from the refs already on disk, so it works with no network. That means
+    it is only as current as the last fetch, and being wrong in the safe
+    direction -- reporting 0 when there is something new -- is the right way to
+    be wrong: it never nags, and when it does speak it is certain.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-list", "--count", "HEAD..@{upstream}"],
+            capture_output=True, text=True, timeout=5, check=True).stdout
+        return int(out.strip() or 0)
+    except Exception:
+        return 0            # no upstream, no git, detached -- say nothing
 
 
 class State:
