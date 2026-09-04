@@ -455,7 +455,20 @@ export function createGrid(host, config) {
       // A cell may render a link to *look* like one -- "where is this used?" --
       // but it is a figure, not navigation, and letting the href through sets
       // the hash and re-routes the whole screen underneath the panel.
-      if (e.target.closest('a')) e.preventDefault();
+      //
+      // UNLESS THE CELL SAYS OTHERWISE. Some derived cells really are the way
+      // in to what they count: "5 rooms" on a unit type is the link to that
+      // type's rooms, and the screen above the table says "click one to edit
+      // its rooms". Swallowed by the blanket rule, that click opened a panel
+      // explaining what the number meant and went nowhere -- a link that
+      // reads as a link, is styled as a link, and is not one.
+      //
+      // `data-goto` is the cell declaring which it is. Marked, the href does
+      // its job and the explanation is not offered on top of it; unmarked,
+      // nothing changes.
+      const link = e.target.closest('a');
+      if (link && link.hasAttribute('data-goto')) return;
+      if (link) e.preventDefault();
       explain(row, col, td);
     }
   });

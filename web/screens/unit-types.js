@@ -39,7 +39,10 @@ function renderList(main, types, ref) {
       { key: 'classification', label: 'Class', kind: 'input', text: true,
         width: '100px', align: 'left' },
       { key: 'rooms', label: 'Rooms', kind: 'derived', dp: 0, width: '64px',
-        render: (v, r) => `<a href="#/unit-types?id=${encodeURIComponent(r.id)}">${v} rooms</a>` },
+        // data-goto: a real link, not a figure dressed as one -- the grid
+        // swallows anchors in derived cells unless the cell says otherwise.
+        render: (v, r) =>
+          `<a data-goto href="#/unit-types?id=${encodeURIComponent(r.id)}">${v} rooms</a>` },
       { key: 'count', label: 'Units', kind: 'derived', dp: 0, width: '64px',
         title: 'Summed from the floor matrix, not typed.' },
       { key: 'area_sqm', label: 'Carpet', unit: 'sq.m', kind: 'derived', dp: 2, width: '86px' },

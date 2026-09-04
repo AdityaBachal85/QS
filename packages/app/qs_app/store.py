@@ -282,16 +282,34 @@ class Store:
         return model
 
     def load_params(self, project_id: str) -> ParameterSet:
+        """The project's parameters, over the declared defaults.
+
+        A STORED SET IS A SNAPSHOT, NOT THE WHOLE VOCABULARY.  These rows were
+        written by whatever version of the engine saved the project, so a
+        parameter declared since then is simply absent from them -- and this
+        rebuilt the set from the rows alone, so the absence became the answer.
+        ``params["construction_area_sqft"]`` then raised "unknown project
+        parameter", which reads as a coding mistake and is really a project
+        saved last week.  Every new parameter broke every existing project the
+        same way, and the ``if not rows`` guard only ever covered the case
+        where nothing had been saved at all.
+
+        So the rows are an OVERRIDE of ``ParameterSet.defaults()``: a value a QS
+        has set wins, and anything declared since the save arrives at its
+        default rather than vanishing.  A row whose key is no longer declared is
+        kept -- it is a number somebody entered, and dropping it silently is not
+        this function's decision to make.
+        """
         rows = self._conn.execute(
             f'SELECT * FROM "project_parameter" WHERE "{OWNER}" = ?', (project_id,)
         ).fetchall()
         if not rows:
             return ParameterSet.defaults()
-        return ParameterSet({
-            r["key"]: Parameter(r["key"], r["value"], r["unit"] or "",
-                                r["description"] or "", r["source"] or "")
-            for r in rows
-        })
+        values = dict(ParameterSet.defaults().values)
+        for r in rows:
+            values[r["key"]] = Parameter(r["key"], r["value"], r["unit"] or "",
+                                         r["description"] or "", r["source"] or "")
+        return ParameterSet(values)
 
     def save_params(self, project_id: str, params: ParameterSet) -> None:
         cur = self._conn.cursor()
