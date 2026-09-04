@@ -65,6 +65,12 @@ route('/reconciliation', async (main) => {
         </table></div>
       </div>`).join('')}
 
+    <div class="card" id="dadoCard" hidden>
+      <h2>The dado line
+        <span class="sub">measured, not agreed — nothing here has been changed</span></h2>
+      <div id="dadoBody"></div>
+    </div>
+
     ${r.warnings.length ? `
       <div class="card">
         <h2>Import notes <span class="sub">${r.warnings.length}</span></h2>
@@ -74,6 +80,93 @@ route('/reconciliation', async (main) => {
           ${r.warnings.map(w => `<div class="explain" style="padding-left:0">• ${escapeHtml(w)}</div>`).join('')}
         </div>
       </div>` : ''}`;
+
+  // -- the dado line, measured both ways ---------------------------------
+  //
+  // You asked to see this before deciding, so it is a report: it runs the
+  // take-off twice, once as it stands and once measured the way the workbook
+  // measures it, and states the difference. No rule changed.
+  api.get('/dado-basis').then(d => {
+    const card = document.getElementById('dadoCard');
+    const body = document.getElementById('dadoBody');
+    if (!card || !body || !d.rows.length) return;
+    card.hidden = false;
+
+    const pct = (v) => `${(v / d.workbook_total * 100).toFixed(2)}%`;
+    body.innerHTML = `
+      <div class="card-body">
+        <p style="margin-top:0">A dado and the wall above it <strong>partition the
+        height</strong> of a room — the tiles take the lower part and the plaster
+        takes what is left. Your workbook measures them that way:
+        <span class="mono">E46 = D43×2.40</span> for the dado and
+        <span class="mono">E47 = D43×0.70</span> for the wall, and
+        2.40 + 0.70 = 3.10, the room's own height.</p>
+        <p>This platform does not. It measures the dado at 2.10 m — a default
+        nobody chose — and then charges the wall for nearly the full height on
+        top, so the same strip is paid for twice. Wall finishes are
+        ₹6.6 crore of the take-off, so this is not a rounding matter.</p>
+        <p style="margin-bottom:0"><strong>Nothing below has been changed.</strong>
+        This is what the change would be worth, so you can decide having seen
+        it.</p>
+      </div>
+      <div class="grid-wrap"><table class="grid">
+        <thead><tr>
+          <th class="left" style="min-width:170px">Room type</th>
+          <th style="min-width:60px">Rooms</th>
+          <th style="min-width:96px">Dado now</th>
+          <th style="min-width:110px">Dado, workbook</th>
+          <th style="min-width:96px">Wall now</th>
+          <th style="min-width:110px">Wall, workbook</th>
+          <th class="total" style="min-width:130px">Would move</th>
+        </tr></thead>
+        <tbody>${d.rows.map(row => `
+          <tr>
+            <td class="label left">${escapeHtml(row.room_type)}</td>
+            <td class="derived note">${row.rooms}</td>
+            <td class="derived note">${fmt.n(row.dado_now, 2)} m</td>
+            <td class="derived note">${fmt.n(row.dado_workbook, 2)} m</td>
+            <td class="derived note">${fmt.n(row.wall_now, 2)} m</td>
+            <td class="derived note">${fmt.n(row.wall_workbook, 2)} m</td>
+            <td class="derived note total">${row.money > 0 ? '+' : ''}${
+              fmt.money(row.money)}</td>
+          </tr>`).join('')}
+        </tbody>
+        <tfoot><tr class="total-row">
+          <td class="left"><strong>${d.room_types_affected} room types ·
+            ${d.wall_rows_affected} wall rows</strong></td>
+          <td colspan="5"></td>
+          <td><strong>${d.moves_by > 0 ? '+' : ''}${fmt.money(d.moves_by)}</strong></td>
+        </tr></tfoot>
+      </table></div>
+      <div class="card-body" style="border-top:1px solid var(--line)">
+        <table class="kv" style="width:100%"><tbody>
+          <tr><td>The take-off as it stands</td>
+              <td class="right mono">${fmt.money(d.total_now)}</td>
+              <td class="right mono">${d.gap_now > 0 ? '+' : ''}${pct(d.gap_now)}
+                against the workbook</td></tr>
+          <tr><td>Measured the workbook's way</td>
+              <td class="right mono">${fmt.money(d.total_partitioned)}</td>
+              <td class="right mono">${d.gap_partitioned > 0 ? '+' : ''}${
+                pct(d.gap_partitioned)} against the workbook</td></tr>
+          <tr class="total-row"><td><strong>The change</strong></td>
+              <td class="right mono"><strong>${d.moves_by > 0 ? '+' : ''}${
+                fmt.money(d.moves_by)}</strong></td>
+              <td class="right mono"><strong>${d.closer ? 'closer to' : 'further from'
+                } the workbook</strong></td></tr>
+        </tbody></table>
+        <p class="muted" style="margin-bottom:0">${d.closer
+          ? `The change would bring the finishing take-off from ${
+              d.gap_now > 0 ? '+' : ''}${pct(d.gap_now)} to ${
+              d.gap_partitioned > 0 ? '+' : ''}${pct(d.gap_partitioned)} of the
+             workbook's own figure. Kitchens and pantries are left alone —
+             their dado already runs along the counters and their wall already
+             has it deducted.`
+          : `The change would move the take-off away from the workbook, which is
+             worth understanding before agreeing to it.`}
+          Say the word and it goes in, with the movement recorded in the
+          expected-delta ledger by name.</p>
+      </div>`;
+  }).catch(() => { /* the workbook may not be present; the card stays hidden */ });
 
   // Every figure on this screen opens its working. A reconciliation line is
   // where the platform and the workbook are put side by side, so "why are

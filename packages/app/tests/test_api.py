@@ -464,3 +464,48 @@ def test_a_reconciliation_line_carries_the_delta_it_predicted(client):
     for line in explained:
         assert line["expected_delta"] is not None
         assert line["difference"] == pytest.approx(line["expected_delta"], abs=0.01)
+
+
+# -- the dado line: measured, and nothing changed --------------------------
+
+def test_the_dado_report_changes_no_number(client):
+    """C3.4 is a measurement, not an edit. Asking must not move anything."""
+    before = client.get("/api/finish-totals").json()["total"]
+    report = client.get("/api/dado-basis").json()
+    assert report["rows"]
+    after = client.get("/api/finish-totals").json()["total"]
+    assert after == pytest.approx(before), "reporting moved the take-off"
+    assert report["total_now"] == pytest.approx(before)
+
+
+def test_the_dado_and_the_wall_should_partition_the_height(client):
+    """The finding itself: today they overlap, and the workbook's do not."""
+    rows = client.get("/api/dado-basis").json()["rows"]
+    toilets = [r for r in rows if "Toilet" in r["room_type"] or r["room_type"] == "WC"]
+    assert toilets
+    for row in toilets:
+        # The workbook's two bands add to about the room's own height. Ours add
+        # to far more, which is the same strip charged twice. The tolerance is
+        # loose because a unit type spanning two floor heights is averaged into
+        # one figure for this table -- the point is the shape, not the decimal.
+        workbook = row["dado_workbook"] + row["wall_workbook"]
+        assert 2.9 <= workbook <= 3.7, (
+            f"{row['room_type']} does not partition in the workbook: {workbook:.2f}")
+        assert row["dado_now"] + row["wall_now"] > workbook + 1.0, (
+            f"{row['room_type']} already partitions — this report is stale")
+
+
+def test_the_report_leaves_counter_measured_rooms_alone(client):
+    """A kitchen's dado runs along its counters and is already right."""
+    rows = client.get("/api/dado-basis").json()["rows"]
+    named = {r["room_type"] for r in rows}
+    assert "Kitchen" not in named and "Pantry" not in named
+
+
+def test_the_report_says_what_the_change_would_be_worth(client):
+    d = client.get("/api/dado-basis").json()
+    assert d["total_partitioned"] - d["total_now"] == pytest.approx(d["moves_by"])
+    assert d["moves_by"] == pytest.approx(sum(r["money"] for r in d["rows"]),
+                                          rel=0.02)
+    assert abs(d["gap_partitioned"]) < abs(d["gap_now"]), (
+        "the proposal should move the take-off toward the workbook")

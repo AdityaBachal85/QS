@@ -688,6 +688,41 @@ def get_reconciliation() -> dict[str, Any]:
     }
 
 
+@app.get("/api/dado-basis")
+def get_dado_basis() -> dict[str, Any]:
+    """Where the dado line sits, measured both ways. Reporting only.
+
+    Nothing this route touches changes a number: it measures the take-off as it
+    stands and as it would be if the dado and the wall above it partitioned the
+    room's height the way the workbook measures them, and reports the
+    difference. The decision is yours; this is what it is worth.
+    """
+    if not WORKBOOK.exists():
+        raise HTTPException(404, f"workbook not found at {WORKBOOK}")
+    from qs_importer.dado_basis import build_report
+
+    model, params = state.require()
+    report = build_report(model, params, imported_workbook().workbook)
+    return {
+        "rows": [{
+            "room_type": r.room_type, "rooms": r.rooms,
+            "dado_now": r.dado_now, "dado_workbook": r.dado_workbook,
+            "wall_now": r.wall_now, "wall_workbook": r.wall_workbook,
+            "dado_money": r.dado_money, "wall_money": r.wall_money,
+            "money": r.money,
+        } for r in report.rows],
+        "total_now": report.total_now,
+        "total_partitioned": report.total_partitioned,
+        "workbook_total": report.workbook_total,
+        "moves_by": report.moves_by,
+        "gap_now": report.gap_now,
+        "gap_partitioned": report.gap_partitioned,
+        "closer": report.closer,
+        "room_types_affected": report.room_types_affected,
+        "wall_rows_affected": report.wall_rows_affected,
+    }
+
+
 # --------------------------------------------------------------------------
 # Write -- inputs only. No arithmetic lives in any of these.
 # --------------------------------------------------------------------------
