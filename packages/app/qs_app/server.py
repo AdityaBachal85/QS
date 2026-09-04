@@ -179,8 +179,21 @@ def _actor_for(session_token: str | None) -> str:
     return f"{record['name']} <{record['email']}>"
 
 
+#: Whether an account is needed to change anything.
+#:
+#: Off, for now, at your request: nobody is asked to sign in and every write
+#: goes through. The machinery underneath is intact -- accounts, roles,
+#: sessions, and the audit log that names whoever made a change -- so turning
+#: it back on is this flag, not a rebuild. Until then the audit log records
+#: "local", which is honest: it says the change was made at this installation
+#: by somebody it cannot name.
+ACCOUNTS_REQUIRED = False
+
+
 def writer(user: User | None = Depends(signed_in)) -> User | None:
     """Refuse a write the signed-in user may not make."""
+    if not ACCOUNTS_REQUIRED:
+        return user
     if state.store.user_count() == 0:
         return user                         # nobody has set up accounts yet
     if user is None:
@@ -202,7 +215,8 @@ def get_me(user: User | None = Depends(signed_in)) -> dict[str, Any]:
     """Who is signed in, and whether accounts are in use at all."""
     return {
         "signed_in": user is not None,
-        "open_access": state.store.user_count() == 0,
+        "accounts_required": ACCOUNTS_REQUIRED,
+        "open_access": not ACCOUNTS_REQUIRED or state.store.user_count() == 0,
         "user": None if user is None else {
             "id": user.id, "email": user.email, "name": user.name,
             "role": user.role.value, "may_write": user.may_write(),

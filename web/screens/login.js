@@ -1,5 +1,12 @@
 // Sign in.
 //
+// NOT LOADED. Signing in is switched off (`server.ACCOUNTS_REQUIRED = False`),
+// so this screen is not in `SCREENS` in app.js and nothing routes to it. It is
+// kept rather than deleted because the accounts underneath it are intact —
+// users, roles, sessions, scrypt hashing and the audit log that names whoever
+// made a change. Turning it back on is the flag plus this screen's name in
+// that list.
+//
 // The audit log has recorded every write since the store was built, and until
 // accounts existed every row said "local". A change log that cannot name a
 // person is a list of events, not an account of what happened — which is how

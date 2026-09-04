@@ -155,7 +155,7 @@ window.addEventListener('hashchange', render);
 const SCREENS = [
   'overview', 'room-config', 'unit-types', 'openings', 'rates', 'mapping',
   'takeoff', 'finish-totals', 'cost-lines', 'summary', 'parameters',
-  'validation', 'reconciliation', 'audit', 'login', 'projects',
+  'validation', 'reconciliation', 'audit', 'projects',
 ];
 
 // Which build is on screen.
@@ -164,30 +164,18 @@ const SCREENS = [
 // current code -- before that, a browser could reuse an old `app.js` for hours
 // and a pulled change simply would not appear. This stamp makes that visible
 // rather than something to be trusted.
+// Signing in is switched off (`server.ACCOUNTS_REQUIRED`), so there is nobody
+// to name and nothing to ask for. The slot stays in the header, empty, because
+// the accounts underneath are intact and this is where they will show again.
 async function showWho() {
   try {
     const me = await api.get('/me');
     const el = document.getElementById('whoami');
     if (!el) return;
-    if (me.open_access) {
-      el.innerHTML = `<a href="#/login" class="chip warn"
-        title="No accounts exist, so anyone who can reach this can change it.
-Every change is logged as “local” until somebody signs in."
-        style="text-decoration:none">no accounts — set one up</a>`;
-    } else if (me.signed_in) {
-      el.innerHTML = `<span class="chip mute" title="${escapeAttr(me.user.email)}"
-        >${escapeAttr(me.user.name)} · ${escapeAttr(me.user.role)}</span>
-        <a href="#" id="signout" class="link-quiet" style="margin-left:6px">sign out</a>`;
-      const out = document.getElementById('signout');
-      if (out) out.onclick = async (e) => {
-        e.preventDefault();
-        await api.post('/logout');
-        location.hash = '#/login';
-        location.reload();
-      };
-    } else {
-      el.innerHTML = '<a href="#/login" class="chip" style="text-decoration:none">sign in</a>';
-    }
+    el.innerHTML = me.accounts_required && me.signed_in
+      ? `<span class="chip mute" title="${escapeAttr(me.user.email)}"
+          >${escapeAttr(me.user.name)}</span>`
+      : '';
   } catch { /* never block the app on this */ }
 }
 

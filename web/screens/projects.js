@@ -14,13 +14,15 @@ route('/projects', async (main) => {
   const [data, me] = await Promise.all([api.get('/dashboard'), api.get('/me')]);
   const live = data.projects.filter(p => !p.archived);
   const archived = data.projects.filter(p => p.archived);
-  const mayWrite = me.open_access || (me.user && me.user.may_write);
+  const mayWrite = !me.accounts_required || (me.user && me.user.may_write);
 
   main.innerHTML = `
     <div class="screen-head">
       <h1>Projects</h1>
-      <p>Every estimate this installation holds. Open one to work in it, or copy
-         one to start the next — a copy shares no rows with its original.</p>
+      <p>Every estimate this installation holds. Open one to work in it, copy one
+         to start the next revision, or begin an empty one. A copy shares no rows
+         with its original: editing R1 leaves R0 exactly as it was.</p>
+      ${mayWrite ? '<button id="newProject" class="btn primary">New project</button>' : ''}
     </div>
     <div class="card"><h2>Live <span class="sub">${live.length}</span></h2>
       <div id="live"></div></div>
@@ -65,6 +67,19 @@ route('/projects', async (main) => {
   grid('live', live, false);
   if (archived.length) grid('archived', archived, true);
 
+  const create = document.getElementById('newProject');
+  if (create) create.onclick = async () => {
+    const name = window.prompt('Name for the new project');
+    if (!name || !name.trim()) return;
+    const city = window.prompt(`City for “${name.trim()}”`, '') ?? '';
+    try {
+      await api.post('/projects/new', { name: name.trim(), city: city.trim() });
+      toast(`Created “${name.trim()}” and opened it — it starts empty`);
+      location.hash = '#/room-config';
+      location.reload();
+    } catch (err) { toast(err.message, true); }
+  };
+
   main.addEventListener('click', async (e) => {
     const link = e.target.closest('[data-act]');
     if (!link) return;
@@ -78,15 +93,20 @@ route('/projects', async (main) => {
         location.hash = '#/overview';
         location.reload();
       } else if (link.dataset.act === 'copy') {
-        const name = window.prompt('Name for the copy', `${project.name} R1`);
+        // The default comes down with the project. Working it out here is how
+        // two copies both offered "R1" and both took it.
+        const name = window.prompt('Name for the copy', project.next_revision);
         if (!name) return;
         await api.post('/projects/duplicate', { project_id: id, name });
-        toast(`Copied to “${name}” and opened it`);
+        toast(`Copied to “${name}” and opened it — ${project.name} is untouched`);
         location.reload();
+      } else if (link.dataset.act === 'archive') {
+        await api.post('/projects/archive', { project_id: id, archived: true });
+        toast('Archived — kept, not deleted');
+        await refresh();
       } else {
-        const archiving = link.dataset.act === 'archive';
-        await api.post('/projects/archive', { project_id: id, archived: archiving });
-        toast(archiving ? 'Archived — kept, not deleted' : 'Restored');
+        await api.post('/projects/restore', { project_id: id });
+        toast(`${project.name} is back in Live, with every row it went in with`);
         await refresh();
       }
     } catch (err) { toast(err.message, true); }
