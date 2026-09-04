@@ -283,11 +283,19 @@ def create_user(payload: dict = Body(...),
 def get_dashboard() -> dict[str, Any]:
     """Every project, with enough of its shape to choose between them."""
     out = []
-    for row in state.store.projects():
+    rows = state.store.projects()
+    names = [r["name"] for r in rows]
+    for row in rows:
         meta = state.store.project_meta(row["id"])
         entry = {**row, "archived": bool(meta.get("archived")),
                  "updated_at": meta.get("updated_at"),
-                 "created_at": meta.get("created_at"), "open": row["id"] == state.project_id}
+                 "created_at": meta.get("created_at"),
+                 "open": row["id"] == state.project_id,
+                 # What a copy of this one would be called. Worked out here
+                 # from the names in use, because the screen computes nothing
+                 # -- offering "R1" from the browser is how two projects ended
+                 # up sharing a name.
+                 "next_revision": service.next_revision_name(row["name"], names)}
         try:
             model = state.model if row["id"] == state.project_id \
                 else state.store.load(row["id"])
@@ -310,6 +318,31 @@ def open_project(payload: dict = Body(...),
     return {"ok": True, **_touched()}
 
 
+@app.post("/api/projects/new")
+def create_project(payload: dict = Body(...),
+                   _: User | None = Depends(writer)) -> dict[str, Any]:
+    """Start an estimate from nothing.
+
+    Until now the only way to get a project was to copy one, which meant every
+    new estimate began life carrying somebody else's rooms.
+    """
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        raise HTTPException(400, "a project needs a name")
+    if any(r["name"].strip().casefold() == name.casefold()
+           for r in state.store.projects()):
+        raise HTTPException(409, f"{name!r} already exists. Give this one a "
+                                 f"different name, or copy the existing one.")
+
+    model = service.new_project(name, str(payload.get("city", "")).strip(),
+                                str(payload.get("client", "")).strip())
+    params = ParameterSet.defaults()
+    state.store.save(model, params)
+    state.store.set_archived(model.project.id, False)
+    state.open(model.project.id)
+    return {"ok": True, "project_id": model.project.id, **_touched()}
+
+
 @app.post("/api/projects/duplicate")
 def duplicate_project(payload: dict = Body(...),
                       _: User | None = Depends(writer)) -> dict[str, Any]:
@@ -319,11 +352,16 @@ def duplicate_project(payload: dict = Body(...),
     record a fresh id, so the two can never share a row.
     """
     source_id = str(payload.get("project_id", "")) or state.project_id
-    name = str(payload.get("name", "")).strip()
     if not source_id or not state.store.exists(source_id):
         raise HTTPException(404, "no such project to copy")
-    if not name:
-        raise HTTPException(400, "the copy needs a name")
+
+    rows = state.store.projects()
+    source = next(r for r in rows if r["id"] == source_id)
+    name = str(payload.get("name", "")).strip() or service.next_revision_name(
+        source["name"], [r["name"] for r in rows])
+    if any(r["name"].strip().casefold() == name.casefold() for r in rows):
+        raise HTTPException(409, f"{name!r} already exists. Two projects of one "
+                                 f"name cannot be told apart on any screen.")
 
     model = state.store.load(source_id)
     params = state.store.load_params(source_id)
@@ -339,8 +377,26 @@ def archive_project(payload: dict = Body(...),
     project_id = str(payload.get("project_id", ""))
     if not state.store.exists(project_id):
         raise HTTPException(404, f"no project {project_id!r}")
-    state.store.set_archived(project_id, bool(payload.get("archived", True)))
-    return {"ok": True}
+    archiving = bool(payload.get("archived", True))
+    state.store.set_archived(project_id, archiving)
+    return {"ok": True, "archived": archiving}
+
+
+@app.post("/api/projects/restore")
+def restore_project(payload: dict = Body(...),
+                    _: User | None = Depends(writer)) -> dict[str, Any]:
+    """Bring an archived project back.
+
+    Archiving never deleted anything -- every row stayed where it was -- so
+    this only clears the flag. It exists as its own route because "restore"
+    is a thing a person does, and asking them to archive something with
+    ``archived: false`` is not an interface.
+    """
+    project_id = str(payload.get("project_id", ""))
+    if not state.store.exists(project_id):
+        raise HTTPException(404, f"no project {project_id!r}")
+    state.store.set_archived(project_id, False)
+    return {"ok": True, "archived": False}
 
 
 # --------------------------------------------------------------------------

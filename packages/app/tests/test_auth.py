@@ -193,12 +193,121 @@ def test_a_copy_shares_no_rows_with_its_original(app_client):
                 & {r.id for r in original.rate_items})
 
 
+def test_editing_a_copy_leaves_the_original_exactly_as_it_was(app_client):
+    """R1 is where the work happens; R0 must not move a figure.
+
+    Id-disjointness is necessary and not sufficient -- a copy could share a
+    parameter set, or write through a table the duplicate forgot. This reads
+    every row of the original back after editing the copy and compares it
+    field by field.
+    """
+    import dataclasses
+
+    from qs_app import server
+
+    def snapshot(project_id):
+        model = server.state.store.load(project_id)
+        params = server.state.store.load_params(project_id)
+        return ({attr: [dataclasses.asdict(i) for i in getattr(model, attr)]
+                 for attr in (f.name for f in dataclasses.fields(model))
+                 if isinstance(getattr(model, attr), list)},
+                params.as_dict())
+
+    before = snapshot("avs")
+    made = app_client.post("/api/projects/duplicate",
+                           json={"project_id": "avs"}).json()
+    copy_id = made["project_id"]
+
+    copy = server.state.store.load(copy_id)
+    room = copy.unit_type_rooms[0]
+    room.carpet_area_sqm = room.carpet_area_sqm + 99.0
+    room.label = "edited in the copy"
+    copy.unit_type_rooms.pop()
+    copy.project.city = "Somewhere else"
+    server.state.store.save(copy, server.state.store.load_params(copy_id))
+
+    assert snapshot("avs") == before, "editing the copy changed the original"
+    assert server.state.store.load("avs").project.city != "Somewhere else"
+
+
+def test_a_second_copy_is_r2_not_a_second_r1(app_client):
+    """Two projects of one name cannot be told apart on any screen."""
+    first = app_client.post("/api/projects/duplicate",
+                            json={"project_id": "avs"}).json()
+    second = app_client.post("/api/projects/duplicate",
+                             json={"project_id": "avs"}).json()
+    names = {p["id"]: p["name"]
+             for p in app_client.get("/api/dashboard").json()["projects"]}
+    assert names[first["project_id"]] != names[second["project_id"]]
+    assert names[second["project_id"]].endswith("R2")
+
+    # And the screen is told the name rather than guessing it.
+    cards = {p["id"]: p for p in app_client.get("/api/dashboard").json()["projects"]}
+    assert cards["avs"]["next_revision"].endswith("R3")
+
+
+def test_a_name_already_in_use_is_refused_rather_than_duplicated(app_client):
+    made = app_client.post("/api/projects/duplicate",
+                           json={"project_id": "avs", "name": "Taken"})
+    assert made.status_code == 200
+    again = app_client.post("/api/projects/duplicate",
+                            json={"project_id": "avs", "name": "taken"})
+    assert again.status_code == 409
+    assert "already exists" in again.json()["detail"]
+
+
+def test_a_new_project_starts_empty(app_client):
+    from qs_app import server
+
+    made = app_client.post("/api/projects/new",
+                           json={"name": "Palm Grove", "city": "Thane"})
+    assert made.status_code == 200, made.text
+    model = server.state.store.load(made.json()["project_id"])
+    assert model.project.name == "Palm Grove" and model.project.city == "Thane"
+    assert not model.unit_types and not model.floors and not model.rate_items
+    assert not model.unit_type_rooms, "a new estimate is nobody else's rooms"
+
+    cards = {p["id"]: p for p in app_client.get("/api/dashboard").json()["projects"]}
+    assert cards[made.json()["project_id"]]["rooms"] == 0
+
+    app_client.post("/api/projects/open", json={"project_id": "avs"})
+
+
+def test_a_new_project_will_not_take_a_name_in_use(app_client):
+    app_client.post("/api/projects/new", json={"name": "Twice Over"})
+    again = app_client.post("/api/projects/new", json={"name": "twice over"})
+    assert again.status_code == 409
+    app_client.post("/api/projects/open", json={"project_id": "avs"})
+
+
 def test_archiving_keeps_the_project(app_client):
     app_client.post("/api/projects/archive",
                     json={"project_id": "avs", "archived": True})
     projects = {p["id"]: p for p in app_client.get("/api/dashboard").json()["projects"]}
     assert projects["avs"]["archived"]
     assert projects["avs"]["rooms"] > 0, "archived, not deleted"
+
+
+def test_an_archived_project_comes_back_whole(app_client):
+    """Archiving is reversible or it is deletion with a nicer word."""
+    rooms = {p["id"]: p["rooms"]
+             for p in app_client.get("/api/dashboard").json()["projects"]}["avs"]
+
+    app_client.post("/api/projects/archive",
+                    json={"project_id": "avs", "archived": True})
+    restored = app_client.post("/api/projects/restore", json={"project_id": "avs"})
+    assert restored.status_code == 200
+    assert restored.json()["archived"] is False
+
+    card = {p["id"]: p
+            for p in app_client.get("/api/dashboard").json()["projects"]}["avs"]
+    assert not card["archived"]
+    assert card["rooms"] == rooms, "came back with every row it went in with"
+
+
+def test_restoring_a_project_that_is_not_there_says_so(app_client):
+    missing = app_client.post("/api/projects/restore", json={"project_id": "nope"})
+    assert missing.status_code == 404
 
 
 # -- the export ------------------------------------------------------------

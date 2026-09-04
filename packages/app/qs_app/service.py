@@ -9,9 +9,10 @@ the same question again.
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, Iterable
 
-from qs_engine.model import OpeningKind, ProjectModel
+from qs_engine.model import OpeningKind, Project, ProjectModel
 from qs_engine.params import ParameterSet
 from qs_engine.rules.rate_buildup import RateBuildupError, effective_rate
 from qs_engine.rules.room_qty import (RULE_DEDUCTIONS, NegativeNetQuantityError,
@@ -606,6 +607,61 @@ def project_card(model: ProjectModel, params: ParameterSet) -> dict[str, Any]:
         "blocking": len(report.blocking),
         "can_issue": report.can_issue,
     }
+
+
+#: How a revision suffix is written: "R" and a number, at the end of a name.
+_REVISION = re.compile(r"^(?P<base>.*?)\s*R(?P<number>\d+)\s*$", re.IGNORECASE)
+
+
+def revision_base(name: str) -> str:
+    """The name with any revision suffix taken off.
+
+    ``AVS Rudraksh R1`` and ``AVS Rudraksh`` are revisions of one estimate, so
+    copying either offers the next number in the same series rather than
+    starting a second one.
+    """
+    match = _REVISION.match(name.strip())
+    return (match.group("base") if match else name.strip()) or name.strip()
+
+
+def next_revision_name(name: str, taken: Iterable[str]) -> str:
+    """The next unused revision of ``name``.
+
+    Two copies of the same project both offered "R1" and both took it, which is
+    how an installation ends up with two projects of one name and no way to
+    tell them apart.  The next number is read off the names already in use, so
+    the second copy is R2 because R1 exists -- not because anything counted the
+    clicks.
+    """
+    base = revision_base(name)
+    folded = {n.strip().casefold() for n in taken}
+    used = set()
+    for existing in folded:
+        match = _REVISION.match(existing)
+        if match and match.group("base").strip() == base.casefold():
+            used.add(int(match.group("number")))
+    # Revisions go forward.  If R7 is the highest, the next is R8 even when R1
+    # through R6 were never made -- filling a gap would give the new copy a
+    # number that reads as older than the thing it was copied from.
+    number = max(used) + 1 if used else 1
+    while f"{base} r{number}".casefold() in folded:
+        number += 1
+    return f"{base} R{number}"
+
+
+def new_project(name: str, city: str = "", client: str = "") -> ProjectModel:
+    """An empty estimate.
+
+    Everything a project holds is a list, and they all start empty: a new
+    estimate is not a copy of a template with someone else's rooms in it.
+    """
+    import re as _re
+    import uuid
+
+    slug = _re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "project"
+    return ProjectModel(project=Project(
+        id=f"{slug}-{uuid.uuid4().hex[:6]}", code=name[:24].upper(),
+        name=name, city=city, client=client))
 
 
 def duplicate(model: ProjectModel, name: str) -> ProjectModel:
