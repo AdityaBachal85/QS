@@ -132,13 +132,17 @@ async function renderRooms(main, ref, id) {
         <span class="sub">the counters a kitchen's tiling is measured along</span></h2>
       <div class="card-body" style="padding-top:6px">
         <p class="muted" style="margin-top:0">A kitchen's dado does not run round
-        the room — it runs along the counters. Enter the four figures and the two
-        dado areas appear beside them:
-        <strong>above = (main × above) + (service × above)</strong>,
-        <strong>below = (main × below) + (service × below)</strong>. One term per
-        counter, added — not (main + service) × height, so a service counter can
-        take its own height. They carry straight into
-        <em>Finishes, quantities and cost</em> below.</p>
+        the room — it runs along the counters. <strong>Four figures, all
+        entered</strong>: the two counter runs, and the tiling height above and
+        below them.</p>
+        <p class="muted" style="margin-bottom:0">What they produce appears in
+        <em>Finishes, quantities and cost</em> below, against
+        <em>Dado</em> and <em>Dado Below Kitchen Platform</em>:
+        <strong>above = (main × above) + (service × above)</strong> and
+        <strong>below = (main × below) + (service × below)</strong> — one term
+        per counter, added. Not (main + service) × height: the two agree today,
+        and only this form survives a service counter taking its own height.
+        Click either figure down there to read the arithmetic.</p>
       </div>
       <div id="kitchen"></div>
     </div>
@@ -539,22 +543,17 @@ async function renderKitchen(unitTypeId, u) {
         title: 'The workbook derives this as main − 0.9. That is a habit frozen '
              + 'into a formula, and an L-shaped service run does not obey it, '
              + 'so here it is entered.' },
-      { key: 'dado_above_m', label: 'Above ht', unit: 'm', kind: 'input',
-        dp: 2, width: '104px', nullable: true, render: entered,
+      { key: 'dado_above_m', label: 'Above dado', unit: 'm', kind: 'input',
+        dp: 2, width: '112px', nullable: true, render: entered,
         title: 'Tiling height above the counter.' },
-      { key: 'dado_below_m', label: 'Below ht', unit: 'm', kind: 'input',
-        dp: 2, width: '104px', nullable: true, render: entered,
+      { key: 'dado_below_m', label: 'Below dado', unit: 'm', kind: 'input',
+        dp: 2, width: '112px', nullable: true, render: entered,
         title: 'Tiling height below it — the counter\u2019s own height.' },
-      { key: 'dado_above', label: 'Dado above', unit: 'sq.m', kind: 'derived',
-        dp: 2, width: '116px',
-        title: '(main × above) + (service × above). Click for the working.',
-        render: v => (v === null || v === undefined
-          ? '<span class="muted">—</span>' : fmt.n(v, 2)) },
-      { key: 'dado_below', label: 'Dado below', unit: 'sq.m', kind: 'derived',
-        dp: 2, width: '116px',
-        title: '(main × below) + (service × below). Click for the working.',
-        render: v => (v === null || v === undefined
-          ? '<span class="muted">—</span>' : fmt.n(v, 2)) },
+      // Four columns, and only four. The areas these produce used to sit here
+      // as two more, named so alike -- "Above ht" beside "Dado above" -- that
+      // the height you type and the area computed from it read as the same
+      // thing twice. They belong where the money is: Finishes, quantities and
+      // cost, below.
     ],
     rows: data.rooms,
     rowKey: r => r.unit_type_room_id,
@@ -571,29 +570,6 @@ async function renderKitchen(unitTypeId, u) {
       // First figure typed against a room that has none yet.
       return api.post('/collections/kitchen-platforms', {
         unit_type_room_id: row.unit_type_room_id, [col.key]: value });
-    },
-    onDerivedClick: (row, col) => {
-      const which = col.key === 'dado_above' ? 'above' : 'below';
-      const derivation = row[`${col.key}_derivation`];
-      if (!derivation) {
-        openPanel(`${row.room_label} — dado ${which} the counter`,
-          `<div class="deriv-note">${escapeHtml(row.message
-            || 'No counters entered for this room yet.')}</div>`);
-        return true;
-      }
-      showDerivation(`${row.room_label} — dado ${which} the counter`,
-        row[col.key], derivation, {
-          unit: 'sq.m',
-          extra: `<div class="deriv-note">Each counter is measured and the
-            results added. Written <strong>(main × height) + (service × height)</strong>
-            rather than (main + service) × height: the two agree today, and only
-            the first survives a service counter taking a different height.
-            This quantity is what <em>Dado${which === 'below'
-              ? ' Below Kitchen Platform' : ''}</em> costs in the table below,
-            and the plaster on this wall is what is left once both dado areas
-            are taken off — you do not plaster behind the tiles.</div>`,
-        });
-      return true;
     },
   });
 }
