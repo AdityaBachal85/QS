@@ -676,6 +676,102 @@ def _opening_bands(model: ProjectModel, params: ParameterSet,
     return out
 
 
+def internal_finishes(model: ProjectModel, params: ParameterSet) -> dict[str, Any]:
+    """The take-off in the shape of ``Internal Finishes``.
+
+    The workbook lays this out one block per room, under a heading per unit
+    type carrying its count, and a QS reads down it. Every other view here
+    folds those lines up -- by finish, by room type, by unit type -- which
+    answers different questions and none of them is "show me the take-off the
+    way I read it".
+
+    So this is the same lines in the sheet's own order:
+
+        Flat 1A                                              10 units
+          Multi Purpose Room    22.05 sq m   19.39 m      Rs 351.20 / sq ft
+            Flooring        gross  deduct  net  unit  rate  per unit  total
+            ...
+
+    Computed by the engine, not read out of the workbook: the point is that it
+    can be put beside the sheet and checked line for line. The Rs/sq ft against
+    each room is the sheet's own column M --
+    ``=SUM(L5:L16)/C4/10.764`` -- the room's whole finishing cost over its
+    carpet area, in square feet.
+    """
+    from qs_engine.rules.takeoff import compute_takeoff, total_amount
+
+    lines = compute_takeoff(model, params)
+    per_room: dict[str, list] = {}
+    for line in lines:
+        per_room.setdefault(line.room_id, []).append(line)
+
+    sqm_to_sqft = params["factor_sqm_to_sqft"]
+    unit_types = []
+    for unit in sorted(model.unit_types, key=lambda u: u.seq):
+        rooms = []
+        for room in model.rooms_of(unit.id):
+            got = per_room.get(room.id, [])
+            if not got:
+                continue
+            per_unit = sum(l.amount_per_unit for l in got if l.is_priced)
+            area_sqft = room.carpet_area_sqm * sqm_to_sqft
+            rooms.append({
+                "id": room.id, "label": room.label,
+                "room_type": model.room_type(room.room_type_id).name,
+                "carpet_area_sqm": room.carpet_area_sqm,
+                "perimeter_m": room.perimeter_m,
+                "count_per_unit": room.count_per_unit,
+                "amount_per_unit": per_unit,
+                "total_amount": sum(l.total_amount for l in got if l.is_priced),
+                # The sheet's column M: what this room costs to finish, per
+                # square foot of its own carpet.
+                "rate_per_sqft": (per_unit / area_sqft) if area_sqft else None,
+                "unpriced": sum(1 for l in got if not l.is_priced),
+                "lines": [_line_json(l) for l in got],
+            })
+        if not rooms:
+            continue
+        unit_types.append({
+            "id": unit.id, "code": unit.code,
+            "classification": unit.classification,
+            "is_common_area": unit.is_common_area,
+            "units": model.unit_count(unit.id),
+            "rooms": rooms,
+            "amount_per_unit": sum(r["amount_per_unit"] for r in rooms),
+            "total_amount": sum(r["total_amount"] for r in rooms),
+        })
+
+    # The foot of the sheet: rows 1998-2038, a SUMIF per rate description.
+    # A fold over the same lines rather than a second reading of them, so the
+    # summary and the blocks above it cannot disagree the way the workbook's
+    # two door counts do.
+    summary: dict[str, dict[str, Any]] = {}
+    for line in lines:
+        if not line.is_priced:
+            continue
+        key = line.rate_description or line.finish_name
+        entry = summary.setdefault(key, {
+            "description": key, "unit": line.unit, "quantity": 0.0,
+            "amount": 0.0, "lines": 0})
+        entry["quantity"] += line.total_qty
+        entry["amount"] += line.total_amount
+        entry["lines"] += 1
+        if entry["unit"] != line.unit:
+            entry["unit"] = ""
+
+    for entry in summary.values():
+        entry["rate"] = (entry["amount"] / entry["quantity"]
+                         if entry["quantity"] else None)
+
+    return {
+        "unit_types": unit_types,
+        "summary": sorted(summary.values(), key=lambda e: -e["amount"]),
+        "total": total_amount(lines),
+        "line_count": len(lines),
+        "unpriced": sum(1 for l in lines if not l.is_priced),
+    }
+
+
 def finish_totals(model: ProjectModel, params: ParameterSet) -> dict[str, Any]:
     """The building's finishing, folded three ways.
 

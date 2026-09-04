@@ -552,6 +552,13 @@ def get_finish_totals() -> dict[str, Any]:
     return service.finish_totals(model, params)
 
 
+@app.get("/api/internal-finishes")
+def get_internal_finishes() -> dict[str, Any]:
+    """The take-off in the shape of the workbook's Internal Finishes sheet."""
+    model, params = state.require()
+    return service.internal_finishes(model, params)
+
+
 @app.get("/api/takeoff/derivation")
 def get_takeoff_derivation(room_id: str, finish_slot_id: str,
                            unit_type_id: str | None = None,

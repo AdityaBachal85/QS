@@ -535,3 +535,64 @@ def test_being_behind_is_only_claimed_when_it_is_certain(client):
     from qs_app.server import commits_behind
 
     assert commits_behind() >= 0          # never negative, never raises
+
+
+# -- the Internal Finishes sheet, rebuilt ----------------------------------
+
+def test_the_sheet_is_laid_out_the_way_the_workbook_lays_it_out(client):
+    """Unit type, then room block, then the finish rows under it."""
+    d = client.get("/api/internal-finishes").json()
+    assert d["unit_types"]
+    unit = next(u for u in d["unit_types"] if u["code"] == "Flat 7")
+    assert unit["units"] > 0
+    room = next(r for r in unit["rooms"] if r["label"] == "Kitchen")
+    assert room["carpet_area_sqm"] > 0 and room["perimeter_m"] > 0
+    assert {l["finish"] for l in room["lines"]} >= {
+        "Flooring", "Dado", "Kitchen Platform", "Service Platform"}
+
+
+def test_every_room_carries_the_sheets_own_rate_per_square_foot(client, avs):
+    """Column M: SUM(L)/C/10.764 -- the room's cost over its carpet, in sq ft."""
+    d = client.get("/api/internal-finishes").json()
+    factor = avs.params["factor_sqm_to_sqft"]
+    for unit in d["unit_types"]:
+        for room in unit["rooms"]:
+            if not room["rate_per_sqft"]:
+                continue
+            expected = room["amount_per_unit"] / (room["carpet_area_sqm"] * factor)
+            assert room["rate_per_sqft"] == pytest.approx(expected, rel=1e-9)
+
+
+def test_the_summary_is_a_fold_over_the_blocks_above_it(client):
+    """Not a second reading of them, so the two cannot drift apart.
+
+    The workbook's own summary is a SUMIF over a bounded range, which is how
+    F2040 ends up counting row 2010 twice (C-15).
+    """
+    d = client.get("/api/internal-finishes").json()
+    assert d["summary"]
+    assert sum(e["amount"] for e in d["summary"]) == pytest.approx(
+        d["total"], rel=1e-9)
+
+    from_blocks = sum(r["total_amount"]
+                      for u in d["unit_types"] for r in u["rooms"])
+    assert from_blocks == pytest.approx(d["total"], rel=1e-9), (
+        "the room blocks and the total disagree")
+
+
+def test_it_agrees_with_the_takeoff_it_is_a_view_of(client):
+    """One set of lines, shown two ways -- never two sets."""
+    sheet = client.get("/api/internal-finishes").json()
+    totals = client.get("/api/finish-totals").json()
+    assert sheet["total"] == pytest.approx(totals["total"], rel=1e-9)
+
+
+def test_measured_but_unpriced_lines_appear_rather_than_vanish(client):
+    """C-11: work presented as absent is how Rs 65.5 lakh disappeared."""
+    d = client.get("/api/internal-finishes").json()
+    assert d["unpriced"] > 0
+    shown = [l for u in d["unit_types"] for r in u["rooms"] for l in r["lines"]
+             if l["status"] != "priced"]
+    assert len(shown) == d["unpriced"]
+    for line in shown:
+        assert line["message"], "an unpriced line must say why"
