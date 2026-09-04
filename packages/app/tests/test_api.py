@@ -596,3 +596,69 @@ def test_measured_but_unpriced_lines_appear_rather_than_vanish(client):
     assert len(shown) == d["unpriced"]
     for line in shown:
         assert line["message"], "an unpriced line must say why"
+
+
+def test_the_four_counter_figures_are_all_manual(client):
+    """MP, SP, dado above and dado below: entered, never derived."""
+    types = client.get("/api/unit-types").json()
+    flat = next(t for t in types if t["code"] == "Flat 7")
+    row = client.get(f"/api/unit-types/{flat['id']}/kitchen-platforms").json()["rooms"][0]
+
+    for field, value in (("main_platform_m", 4.0), ("service_platform_m", 3.0),
+                         ("dado_above_m", 1.2), ("dado_below_m", 0.8)):
+        written = client.patch(f"/api/collections/kitchen-platforms/{row['id']}",
+                               json={field: value})
+        assert written.status_code == 200, f"{field} is not editable"
+
+    after = client.get(
+        f"/api/unit-types/{flat['id']}/kitchen-platforms").json()["rooms"][0]
+    assert (after["main_platform_m"], after["service_platform_m"],
+            after["dado_above_m"], after["dado_below_m"]) == (4.0, 3.0, 1.2, 0.8)
+    # And the two areas follow, one term per counter.
+    assert after["dado_above"] == pytest.approx(4.0 * 1.2 + 3.0 * 1.2)
+    assert after["dado_below"] == pytest.approx(4.0 * 0.8 + 3.0 * 0.8)
+    assert after["dado_above_derivation"]["expression"] == "(4 x 1.2) + (3 x 1.2)"
+
+
+def test_typing_into_a_room_that_has_no_counters_creates_them(client):
+    """The office Pantries import unmeasured; a QS must be able to fill them."""
+    types = client.get("/api/unit-types").json()
+    office = next(t for t in types if t["code"] == "Office 2")
+    row = client.get(
+        f"/api/unit-types/{office['id']}/kitchen-platforms").json()["rooms"][0]
+    assert row["id"] is None, "this room is meant to start with no counters"
+
+    made = client.post("/api/collections/kitchen-platforms",
+                       json={"unit_type_room_id": row["unit_type_room_id"],
+                             "main_platform_m": 2.4})
+    assert made.status_code == 200, made.text
+
+    after = client.get(
+        f"/api/unit-types/{office['id']}/kitchen-platforms").json()["rooms"][0]
+    assert after["id"] and after["main_platform_m"] == 2.4
+
+
+def test_the_list_says_which_unit_types_have_a_kitchen(client):
+    """So nobody hunts for the tab on a unit type that cannot have one.
+
+    Flat 1A has no Kitchen room at all, so it has no tab -- correctly, and
+    confusingly if the screen does not say so first.
+    """
+    from qs_app import server
+
+    types = {t["code"]: t for t in client.get("/api/unit-types").json()}
+    assert types["Flat 1A"]["counter_rooms"] == 0
+    assert types["Flat 7"]["counter_rooms"] == 1
+    assert types["Office 2"]["counter_rooms"] == 1, "a pantry counts too"
+
+    # The list and the tab must never disagree about where the tab is.
+    model, params = server.state.require()
+    for code, row in types.items():
+        shown = len(service_rooms(row["id"]))
+        assert shown == row["counter_rooms"], f"{code}: list says {row['counter_rooms']}, tab shows {shown}"
+
+
+def service_rooms(unit_type_id):
+    from qs_app import server, service
+    model, params = server.state.require()
+    return service.kitchen_platforms(model, params, unit_type_id)["rooms"]

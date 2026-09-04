@@ -12,7 +12,8 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable
 
-from qs_engine.model import OpeningKind, Project, ProjectModel
+from qs_engine.model import (OpeningKind, Project, ProjectModel,
+                             RoomCategory)
 from qs_engine.params import ParameterSet
 from qs_engine.rules.rate_buildup import RateBuildupError, effective_rate
 from qs_engine.rules.room_qty import (RULE_DEDUCTIONS, NegativeNetQuantityError,
@@ -133,6 +134,11 @@ def unit_types(model: ProjectModel, params: ParameterSet) -> list[dict[str, Any]
             "id": u.id, "code": u.code, "classification": u.classification,
             "is_common_area": u.is_common_area,
             "rooms": len(rooms),
+            # How many rooms in this type are measured off a counter, so the
+            # list can say where the Kitchen platforms tab will be. Not every
+            # flat has a kitchen -- Flat 1A does not -- and hunting for a tab
+            # on a unit type that cannot have one is a bad way to find that out.
+            "counter_rooms": len(counter_rooms(model, u.id)),
             "count": model.unit_count(u.id),
             "area_sqm": unit_type_area_sqm(u.id, model).value,
             "area_sqft": per_unit.value,
@@ -236,6 +242,42 @@ def room_quantities(model: ProjectModel, params: ParameterSet,
     return out
 
 
+#: Rules that measure off a counter rather than round the perimeter.
+COUNTER_RULES = frozenset({"kitchen_platform", "service_platform"})
+
+
+def counter_rooms(model: ProjectModel, unit_type_id: str) -> list:
+    """The rooms in one unit type that the Kitchen platforms tab covers.
+
+    One rule, so the list and the tab cannot disagree: a room qualifies if its
+    schedule prices a counter, if it already has counters entered, or if it is
+    a kitchen at all. The first is the real test -- the office Pantry is priced
+    for a service counter and is not categorised as a kitchen anywhere -- and
+    the last is there because you asked for the tab whenever there is a
+    kitchen, priced or not.
+    """
+    slots = {s.id: s for s in model.finish_slots}
+
+    def priced_for_a_counter(room_type_id: str) -> bool:
+        for candidate in {room_type_id, model.pricing_room_type(room_type_id)}:
+            for spec in model.room_finish_specs:
+                if spec.room_type_id != candidate or not spec.is_applicable:
+                    continue
+                slot = slots.get(spec.finish_slot_id)
+                rule = spec.qty_rule or (slot.qty_rule if slot else "")
+                if rule in COUNTER_RULES:
+                    return True
+        return False
+
+    out = []
+    for room in model.rooms_of(unit_type_id):
+        if (model.room_type(room.room_type_id).category is RoomCategory.KITCHEN
+                or model.kitchen_platform(room.id) is not None
+                or priced_for_a_counter(room.room_type_id)):
+            out.append(room)
+    return out
+
+
 def kitchen_platforms(model: ProjectModel, params: ParameterSet,
                       unit_type_id: str) -> dict[str, Any]:
     """The counters in one unit type's rooms, and what they measure.
@@ -268,16 +310,20 @@ def kitchen_platforms(model: ProjectModel, params: ParameterSet,
         return found
 
     rows = []
-    for room in model.rooms_of(unit_type_id):
-        priced_for = measures_off_a_counter(room.room_type_id)
-        if not (priced_for & counter_rules):
-            continue
+    for room in counter_rooms(model, unit_type_id):
+        room_type = model.room_type(room.room_type_id)
+        # Resolved through the pricing mapping too: a room type priced entirely
+        # through another one carries no finish specs of its own.
+        priced_for = (measures_off_a_counter(room.room_type_id)
+                      | measures_off_a_counter(
+                          model.pricing_room_type(room.room_type_id)))
         platform = model.kitchen_platform(room.id)
         entry: dict[str, Any] = {
             "id": platform.id if platform else None,
             "unit_type_room_id": room.id,
-            "room_label": room.label or model.room_type(room.room_type_id).name,
-            "room_type": model.room_type(room.room_type_id).name,
+            "room_label": room.label or room_type.name,
+            "room_type": room_type.name,
+            "priced": bool(priced_for & counter_rules),
             "count_per_unit": room.count_per_unit,
             "main_platform_m": platform.main_platform_m if platform else None,
             "service_platform_m": platform.service_platform_m if platform else None,

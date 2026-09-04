@@ -28,7 +28,10 @@ function renderList(main, types, ref) {
          computed from the square metres you enter; there is no square-foot cell to overwrite.</p>
     </div>
     <div class="card">
-      <h2>All unit types <span class="sub">${types.length} types · click one to edit its rooms</span></h2>
+      <h2>All unit types <span class="sub">${types.length} types · click one to edit its rooms${
+        types.filter(t => t.counter_rooms).length
+          ? ` · ${types.filter(t => t.counter_rooms).length} have a kitchen, where the counters are entered`
+          : ''}</span></h2>
       <div id="grid"></div>
     </div>`;
 
@@ -38,6 +41,14 @@ function renderList(main, types, ref) {
         align: 'left', title: 'Type over it to rename.' },
       { key: 'classification', label: 'Class', kind: 'input', text: true,
         width: '100px', align: 'left' },
+      { key: 'counter_rooms', label: 'Kitchen', kind: 'note', width: '104px',
+        align: 'left',
+        title: 'Unit types with a kitchen or a pantry. Open one and the Kitchen '
+             + 'platforms tab sits between Rooms and Openings, where the four '
+             + 'counter figures are entered.',
+        render: v => (v
+          ? `<span class="tag ok">${v === 1 ? 'counters' : v + ' counters'}</span>`
+          : '<span class="muted">—</span>') },
       { key: 'rooms', label: 'Rooms', kind: 'derived', dp: 0, width: '64px',
         // data-goto: a real link, not a figure dressed as one -- the grid
         // swallows anchors in derived cells unless the cell says otherwise.
