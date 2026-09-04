@@ -10,7 +10,7 @@
 // between this and the workbook, where `Flat Sizes!E57` accepted a perimeter
 // typed into an area column and understated 27 flats (C-3).
 
-import { fmt, toast } from './app.js';
+import { fmt, openPanel, toast } from './app.js';
 import { escapeHtml } from './panel.js';
 
 // The undo stack lives outside any one grid instance. Committing an edit
@@ -95,7 +95,7 @@ export function createGrid(host, config) {
       return opt ? escapeHtml(opt.label)
                  : `<span class="muted">${escapeHtml(v ?? '—')}</span>`;
     }
-    if (col.kind === 'label') return escapeHtml(v ?? '');
+    if (col.kind === 'label' || col.kind === 'note') return escapeHtml(v ?? '');
     // A matrix of counts reads far better with blanks than with a wall of
     // zeros -- the same reason the workbook leaves those cells empty.
     if (col.blankZero && !v) return '';
@@ -110,14 +110,21 @@ export function createGrid(host, config) {
   function cellClass(row, col) {
     const classes = [];
     if (col.kind === 'label') classes.push('label', 'left');
-    else if (col.kind === 'derived') classes.push('derived');
+    // A calculated figure, and a grey cell that is merely not typeable, used to
+    // be the same thing here. `Unit` = SQM and `In the workbook` =
+    // Summary!D20 rendered in the same grey as a Rs 9 crore total and invited
+    // the same click. `note` is the second kind: it reads as information, not
+    // as a figure with a working behind it.
+    else if (col.kind === 'derived') classes.push('derived', 'clickable');
+    else if (col.kind === 'note') classes.push('derived', 'note');
     else if (col.kind === 'delete') classes.push('act');
     else classes.push('cell');
     if (col.kind === 'select') classes.push('sel-cell', 'left');
     if (col.total) classes.push('total');
     if (col.align === 'left') classes.push('left');
     const v = valueOf(row, col);
-    if (col.kind !== 'label' && (v === 0 || v === null || v === undefined)) {
+    if (col.kind !== 'label' && col.kind !== 'note'
+        && (v === 0 || v === null || v === undefined)) {
       // Never a silent zero -- but "empty" and "missing" are different things.
       // A blank laying rate on plaster is normal; a blank *overall* rate on a
       // measured quantity is the false-ceiling case, ₹65.5 lakh shown as
@@ -132,7 +139,8 @@ export function createGrid(host, config) {
       <tr data-r="${ri}">${columns.map((col, ci) => `
         <td class="${cellClass(row, col)}"
             data-r="${ri}" data-c="${ci}"
-            tabindex="${col.kind === 'label' || col.kind === 'delete' ? -1 : 0}"
+            tabindex="${col.kind === 'label' || col.kind === 'note'
+              || col.kind === 'delete' ? -1 : 0}"
             ${stickyFirst && ci === 0
               ? 'style="position:sticky;left:0;z-index:2;background:var(--surface)"' : ''}
             >${display(row, col)}</td>`).join('')}</tr>`).join('');
@@ -443,8 +451,61 @@ export function createGrid(host, config) {
     const row = rows[td.dataset.r];
     if (e.target.closest('.row-del')) { await removeRow(row); return; }
     if (col.kind === 'select') { beginSelect(td, col); return; }
-    if (col.kind === 'derived' && onDerivedClick) onDerivedClick(row, col, td);
+    if (col.kind === 'derived') {
+      // A cell may render a link to *look* like one -- "where is this used?" --
+      // but it is a figure, not navigation, and letting the href through sets
+      // the hash and re-routes the whole screen underneath the panel.
+      if (e.target.closest('a')) e.preventDefault();
+      explain(row, col, td);
+    }
   });
+
+  // Open the working behind a calculated cell.
+  //
+  // The screen's handler gets first refusal and says whether it took the
+  // click. If it did not -- a column nobody wrote a case for, a figure with no
+  // derivation behind it yet -- the fallback opens anyway, with the column's
+  // own explanation and the value in front of it. A grey cell that does
+  // nothing when you click it is the silence this whole platform exists to
+  // remove, so the grid refuses to produce one.
+  function explain(row, col, td) {
+    if (!onDerivedClick) { fallback(row, col); return; }
+    // A handler may be async -- the take-off fetches one line's working on
+    // demand rather than shipping 2 MB of panels nobody opens -- so a promise
+    // is waited on before deciding whether the fallback is needed. Without
+    // this every async handler would read as "handled" simply by returning a
+    // promise, and an unmatched column would go quiet again.
+    const handled = onDerivedClick(row, col, td);
+    if (handled && typeof handled.then === 'function') {
+      handled.then(result => { if (!result) fallback(row, col); },
+                   () => fallback(row, col));
+      return;
+    }
+    // A handler has to *say* it handled the click. Returning nothing is what
+    // a handler does when it has no case for a column, and that is exactly
+    // when the fallback is needed -- so silence must not be the default.
+    if (!handled) fallback(row, col);
+  }
+
+  function fallback(row, col) {
+    const value = valueOf(row, col);
+    const label = [col.label, col.unit].filter(Boolean).join(' ');
+    const shown = value === null || value === undefined || value === ''
+      ? '<span class="muted">nothing here</span>'
+      : escapeHtml(typeof value === 'number'
+        ? fmt.n(value, col.dp ?? 2) : String(value));
+    const name = config.rowName ? config.rowName(row)
+      : (row.label || row.name || row.description || row.code || '');
+
+    openPanel(`${name ? `${name} — ` : ''}${label || 'this figure'}`, `
+      <div class="deriv-value">${shown}${col.unit
+        ? ` <span class="muted" style="font-size:13px">${escapeHtml(col.unit)}</span>` : ''}</div>
+      ${col.title ? `<div class="deriv-note">${escapeHtml(col.title)}</div>` : ''}
+      <div class="deriv-note">The platform computes this on request rather than
+        storing it, so it moves when what it is built from moves. The step-by-step
+        working for this particular column has not been wired up yet — if you need
+        it, say so and it will be.</div>`);
+  }
 
   tbody.addEventListener('dblclick', e => {
     const td = e.target.closest('td.cell');
@@ -507,7 +568,7 @@ export function createGrid(host, config) {
       case 'Enter':
         e.preventDefault();
         if (col.kind === 'input' || col.kind === 'select') beginEdit(td);
-        else if (col.kind === 'derived' && onDerivedClick) onDerivedClick(row, col, td);
+        else if (col.kind === 'derived') explain(row, col, td);
         return;
       case 'Delete':
       case 'Backspace': {

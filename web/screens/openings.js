@@ -4,9 +4,9 @@
 // VLOOKUP bounded to `Doors!D146:H149`. A fifth door type appears because it
 // exists, not because somebody widened a range.
 
-import { api, fmt, refresh, route } from '../app.js';
+import { api, fmt, openPanel, refresh, route } from '../app.js';
 import { createGrid } from '../grid.js';
-import { escapeHtml } from '../panel.js';
+import { escapeHtml, showDerivation, wireTiles } from '../panel.js';
 
 route('/openings', async (main) => {
   const [data, ref, costs] = await Promise.all([
@@ -21,11 +21,11 @@ route('/openings', async (main) => {
          Railings are measured in running metres, not the square metres the workbook labels them.</p>
     </div>
     <div class="tile-row">
-      <div class="tile"><div class="k">Doors &amp; windows cost</div>
+      <div class="tile" data-tile="total"><div class="k">Doors &amp; windows cost</div>
         <div class="v">${fmt.money(costs.total)}</div>
         <div class="s">${fmt.int(costs.total_count)} openings in the building</div></div>
       ${costs.bands.map(b => `
-      <div class="tile"><div class="k">${escapeHtml(b.label)}</div>
+      <div class="tile" data-tile="band:${escapeHtml(b.key)}"><div class="k">${escapeHtml(b.label)}</div>
         <div class="v">${fmt.money(b.amount)}</div>
         <div class="s">${fmt.int(b.count)} nos${
           b.unit && b.quantity ? ` · ${fmt.n(b.quantity, 2)} ${escapeHtml(b.unit)}` : ''}${
@@ -59,20 +59,43 @@ route('/openings', async (main) => {
       <span class="sub">quantity pending Q-1 — the ×32 multiplier is unconfirmed</span></h2>
       <div id="curtain"></div></div>` : ''}`;
 
+  wireTiles(main, Object.fromEntries([
+    ['total', {
+      title: 'Every door, window, railing and bay',
+      value: fmt.money(costs.total),
+      subtitle: `${fmt.int(costs.total_count)} openings`,
+      rows: costs.bands.map(b => [escapeHtml(b.label), fmt.money(b.amount)]),
+      note: `Each band priced on what it is bought by. This was zero until
+        column F of <span class="mono">D&amp;W Schedule</span> was read —
+        doors and windows had quantities and no cost at all.`,
+    }],
+    ...costs.bands.map(b => [`band:${b.key}`, {
+      title: `${b.label} — ${fmt.int(b.count)} in the building`,
+      value: fmt.money(b.amount),
+      subtitle: b.unit && b.quantity
+        ? `${fmt.n(b.quantity, 2)} ${b.unit}` : `${b.lines} type(s)`,
+      rows: (b.amount_derivation ? b.amount_derivation.inputs : [])
+        .map(i => [escapeHtml(i.name), fmt.money(i.value)]),
+      note: (b.amount_derivation ? escapeHtml(b.amount_derivation.note) : '')
+        + ` <a href="#/openings">The table below</a> breaks each type down
+        further — click any figure in it.`,
+    }]),
+  ]));
+
   // A door is bought by the leaf and glazing by the square metre, so the
   // "priced on" column says which of the two figures beside it was multiplied.
   createGrid(document.getElementById('costs'), {
     columns: [
       { key: 'code', label: 'Code', kind: 'label', width: '110px' },
-      { key: 'kind', label: 'Kind', kind: 'derived', width: '112px', align: 'left',
+      { key: 'kind', label: 'Kind', kind: 'note', width: '112px', align: 'left',
         render: v => escapeHtml(String(v).replace('_', ' ')) },
       { key: 'count', label: 'Count', kind: 'derived', dp: 0, width: '92px' },
       { key: 'quantity', label: 'Quantity', kind: 'derived', dp: 2, width: '112px' },
-      { key: 'unit', label: 'Unit', kind: 'derived', width: '56px', align: 'left' },
+      { key: 'unit', label: 'Unit', kind: 'note', width: '56px', align: 'left' },
       { key: 'rate', label: 'Rate', kind: 'derived', width: '112px',
         render: (v, row) => (v === null || v === undefined ? '<span class="muted">—</span>'
           : `₹${fmt.n(v, 2)}<span class="muted"> /${escapeHtml(row.rate_unit)}</span>`) },
-      { key: 'rate_unit', label: 'Priced on', kind: 'derived', width: '96px', align: 'left',
+      { key: 'rate_unit', label: 'Priced on', kind: 'note', width: '96px', align: 'left',
         title: 'A rate per Nos. prices the count; a rate per sq.m or RM prices the '
              + 'measured quantity. Mixing the two raises rather than multiplying.',
         render: v => `<span class="muted">${v === 'NOS' ? 'count' : 'quantity'}</span>` },
@@ -83,6 +106,7 @@ route('/openings', async (main) => {
     // where they read as the gap they are, rather than heading the table.
     rows: [...costs.lines].sort((a, b) => b.amount - a.amount),
     rowKey: r => r.code,
+    onDerivedClick: (row, col) => openingWorking(row, col.key),
     footer: rows => ['<strong>Total</strong>', '', '', '', '', '', '',
                      `<strong>${fmt.money(rows.reduce((a, r) => a + r.amount, 0))}</strong>`],
   });
@@ -132,6 +156,13 @@ route('/openings', async (main) => {
     onDelete: row => api.send('DELETE', `/collections/opening-types/${row.id}`),
     onCommit: (row, col, value) =>
       api.send('PATCH', `/collections/opening-types/${row.id}`, { [col.key]: value }),
+    onDerivedClick: (row, col) => {
+      if (col.key !== 'area_sqm') return false;
+      const line = costs.lines.find(l => l.code === row.code);
+      showDerivation(`${row.code} — area of one leaf`, row.area_sqm,
+        line ? line.area_derivation : null, { unit: 'sq.m' });
+      return !!(line && line.area_derivation);
+    },
   });
 
   const scheduleColumns = [
@@ -140,12 +171,88 @@ route('/openings', async (main) => {
     { key: 'height_m', label: 'Height', unit: 'm', kind: 'derived', dp: 2, width: '76px' },
     { key: 'count', label: 'Nos', kind: 'derived', dp: 0, width: '82px' },
     { key: 'quantity', label: 'Quantity', kind: 'derived', dp: 2, width: '112px', total: true },
-    { key: 'unit', label: 'Unit', kind: 'derived', width: '64px', align: 'left' },
+    { key: 'unit', label: 'Unit', kind: 'note', width: '64px', align: 'left' },
   ];
   for (const [id, rows] of [['doors', data.doors], ['windows', data.windows],
                             ['railings', data.railings], ['curtain', data.curtain_wall]]) {
     const host = document.getElementById(id);
-    if (host) createGrid(host, { columns: scheduleColumns, rows, emptyMessage: 'None scheduled.' });
+    if (host) createGrid(host, {
+      columns: scheduleColumns, rows, rowKey: r => r.code,
+      emptyMessage: 'None scheduled.',
+      onDerivedClick: (row, col) => scheduleWorking(row, col.key),
+    });
+  }
+
+  // -- the workings -------------------------------------------------------
+
+  /** One line of the priced schedule: count, quantity, rate or amount. */
+  function openingWorking(row, key) {
+    const where = `${row.code} — ${String(row.kind).replace('_', ' ')}`;
+
+    if (key === 'count') {
+      showDerivation(`${where} — count`, row.count, row.count_derivation, {
+        format: v => `${fmt.int(v)} nos`,
+        extra: `<div class="deriv-note">Every room that carries this type,
+          folded up through the unit types that contain it. Add one to a room
+          and this moves by itself — nothing links the two by hand.</div>`,
+      });
+      return true;
+    }
+    if (key === 'quantity') {
+      showDerivation(`${where} — quantity`, row.quantity, row.quantity_derivation,
+        { unit: row.unit });
+      return true;
+    }
+    if (key === 'rate') {
+      if (row.rate === null || row.rate === undefined) {
+        openPanel(`${where} — rate`, `<div class="deriv-note">${escapeHtml(
+          row.message || 'No rate reaches this type.')}</div>`);
+        return true;
+      }
+      showDerivation(`${where} — rate`, row.rate, row.rate_derivation, {
+        format: v => `₹${fmt.n(v, 2)}`,
+        extra: `<div class="deriv-note">${escapeHtml(row.rate_description || '')}
+          — per ${escapeHtml(row.rate_unit)}, from <span class="mono">D&amp;W
+          Schedule</span> column F. Nothing was reading that column, which is
+          why doors and windows had quantities and no cost.</div>`,
+      });
+      return true;
+    }
+    if (key === 'amount') {
+      if (row.status !== 'priced') {
+        openPanel(`${where} — amount`, `<div class="deriv-note">${escapeHtml(
+          row.message || 'This type reaches no total.')}</div>
+          <div class="deriv-note">Listed at nothing rather than left out: priced
+          work nobody measured, or measured work nobody priced, is a gap worth
+          seeing (C-11).</div>`);
+        return true;
+      }
+      showDerivation(`${where} — amount`, row.amount, row.amount_derivation, {
+        format: v => fmt.money(v),
+      });
+      return true;
+    }
+    return false;
+  }
+
+  /** A row of one of the per-kind schedules, which carry no money. */
+  function scheduleWorking(row, key) {
+    if (key === 'count') {
+      showDerivation(`${row.code} — count`, row.count, row.count_derivation,
+        { format: v => `${fmt.int(v)} nos` });
+      return true;
+    }
+    if (key === 'quantity') {
+      showDerivation(`${row.code} — quantity`, row.quantity,
+        row.quantity_derivation, { unit: row.unit });
+      return true;
+    }
+    if (key === 'width_m' || key === 'height_m') {
+      showDerivation(`${row.code} — one leaf`, row.width_m * row.height_m,
+        row.area_derivation, { unit: 'sq.m' });
+      return true;
+    }
+    return false;
   }
 });
 

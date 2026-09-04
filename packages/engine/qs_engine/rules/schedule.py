@@ -47,8 +47,15 @@ class ScheduleLine:
     quantity: float
     unit: str
     opening_type_id: str = ""
+    #: How the count and the measured quantity were arrived at -- which rooms
+    #: contributed how many, and what each was multiplied by.  Kept so the
+    #: schedule can show its working rather than a bare number.
+    count_derivation: Derived | None = None
+    quantity_derivation: Derived | None = None
     #: Set by :func:`priced_opening_schedule`; absent on the bare schedule.
     rate: float | None = None
+    rate_derivation: Derived | None = None
+    amount_derivation: Derived | None = None
     rate_unit: str = ""
     rate_item_id: str | None = None
     rate_description: str = ""
@@ -76,8 +83,13 @@ def opening_schedule(model: ProjectModel,
     """
     totals: dict[str, float] = {}
     measures: dict[str, float] = {}
+    # One named term per room that contributes, so "2,180 doors" can be read
+    # back as the rooms it came from rather than taken on trust.
+    counted_from: dict[str, list[Input]] = {}
+    measured_from: dict[str, list[Input]] = {}
     rooms = {r.id: r for r in model.unit_type_rooms}
     types = {t.id: t for t in model.opening_types}
+    unit_codes = {u.id: u.code for u in model.unit_types}
 
     for opening in model.room_openings:
         room = rooms.get(opening.unit_type_room_id)
@@ -86,17 +98,29 @@ def opening_schedule(model: ProjectModel,
         units = model.unit_count(room.unit_type_id)
         multiplier = opening.count * room.count_per_unit * units
         totals[opening.opening_type_id] = totals.get(opening.opening_type_id, 0.0) + multiplier
+        where = (f"{unit_codes.get(room.unit_type_id, '?')} "
+                 f"{room.label or 'room'}")
+        counted_from.setdefault(opening.opening_type_id, []).append(Input(
+            where, multiplier,
+            f"{opening.count:g} in the room x {room.count_per_unit:g} room(s) "
+            f"per unit x {units} unit(s)"))
 
         opening_type = types.get(opening.opening_type_id)
         if opening_type is None:
             continue
         if opening.linear_qty_m is not None:
             measure = opening.linear_qty_m * multiplier
+            basis = f"{opening.linear_qty_m:g} m each"
         elif opening_type.kind is OpeningKind.RAILING:
             measure = 0.0
+            basis = "a railing is measured by its run, and none is entered"
         else:
             measure = opening_type.area_sqm * multiplier
+            basis = (f"{opening_type.width_m:g} x {opening_type.height_m:g} = "
+                     f"{opening_type.area_sqm:g} sq m each")
         measures[opening.opening_type_id] = measures.get(opening.opening_type_id, 0.0) + measure
+        measured_from.setdefault(opening.opening_type_id, []).append(
+            Input(where, measure, f"{multiplier:g} x {basis}"))
 
     lines: list[ScheduleLine] = []
     for opening_type in model.opening_types:
@@ -106,11 +130,32 @@ def opening_schedule(model: ProjectModel,
         if not count:
             continue
         unit = "RM" if opening_type.kind is OpeningKind.RAILING else "SQM"
+        rooms_in = counted_from.get(opening_type.id, [])
+        quantity = measures.get(opening_type.id, 0.0)
         lines.append(ScheduleLine(
             code=opening_type.code, kind=opening_type.kind,
             width_m=opening_type.width_m, height_m=opening_type.height_m,
-            count=count, quantity=measures.get(opening_type.id, 0.0), unit=unit,
+            count=count, quantity=quantity, unit=unit,
             opening_type_id=opening_type.id,
+            count_derivation=derive(
+                count, "opening_count",
+                " + ".join(f"{i.value:g}" for i in rooms_in) or "0",
+                rooms_in,
+                note=f"Every room that carries a {opening_type.code}, folded up "
+                     f"through the unit types that contain it. Nothing is "
+                     f"bounded to a range, so a new room appears here because "
+                     f"it exists (C-18)."),
+            quantity_derivation=derive(
+                quantity, "opening_quantity",
+                " + ".join(f"{i.value:g}" for i in
+                           measured_from.get(opening_type.id, [])) or "0",
+                measured_from.get(opening_type.id, []),
+                note=f"Measured in {unit}. "
+                     + ("A railing is bought by the running metre, so its area "
+                        "is not what is priced."
+                        if opening_type.kind is OpeningKind.RAILING
+                        else f"{opening_type.width_m:g} x "
+                             f"{opening_type.height_m:g} m per leaf.")),
         ))
     return sorted(lines, key=lambda l: l.code)
 
@@ -240,9 +285,28 @@ def _price(line: ScheduleLine, model, params, converter, items, types) -> Schedu
                        rate_unit=item.unit, rate_item_id=item.id,
                        rate_description=item.description, message=str(exc))
 
+    # The rate build-up is kept rather than thrown away once it has produced a
+    # number: "Rs 30,000 a fire door" is a conclusion, and the screen should be
+    # able to show what it was built from.
     return replace(line, status=PRICED, rate=rate_derived.value,
                    rate_unit=item.unit, rate_item_id=item.id,
-                   rate_description=item.description, amount=total)
+                   rate_description=item.description, amount=total,
+                   rate_derivation=rate_derived,
+                   amount_derivation=derive(
+                       total, "opening_amount",
+                       f"{quantity.value:g} {quantity.unit.code} x "
+                       f"{rate_derived.value:g} per {item.unit}",
+                       [Input(f"{line.code} measured", quantity.value,
+                              f"in {quantity.unit.code}"),
+                        Input(item.description or "rate", rate_derived.value,
+                              f"per {item.unit}, from the rate library")],
+                       note="Priced on the count where the rate is per Nos., on "
+                            "the measured quantity otherwise -- a door is bought "
+                            "by the leaf, glazing by the square metre. The "
+                            "multiplication goes through the unit system, so a "
+                            "per-Nos. rate meeting a square-metre quantity "
+                            "raises rather than producing a plausible number "
+                            "(C-35)."))
 
 
 def opening_totals(model: ProjectModel, params: ParameterSet) -> list[ScheduleTotal]:

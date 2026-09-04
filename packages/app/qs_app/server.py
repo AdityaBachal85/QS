@@ -674,6 +674,10 @@ def get_reconciliation() -> dict[str, Any]:
             {"section": l.section, "label": l.label, "excel": l.excel,
              "platform": l.platform, "difference": l.difference,
              "status": l.status.value, "excel_ref": l.excel_ref,
+             # The predicted difference, so a screen can show that an EXPLAINED
+             # line is off by exactly the size the ledger said it would be --
+             # which is what makes it explained rather than merely tolerated.
+             "expected_delta": l.expected_delta,
              "explanation": l.explanation}
             for l in lines
         ],

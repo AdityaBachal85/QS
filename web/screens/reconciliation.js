@@ -4,7 +4,7 @@
 // a named defect predicts -- so a bug cannot hide inside a correction. Anything
 // else is FAIL and blocks acceptance.
 
-import { api, fmt, route } from '../app.js';
+import { api, fmt, openPanel, route } from '../app.js';
 import { escapeHtml } from '../panel.js';
 
 const STATUS = { PASS: 'ok', EXPLAINED: 'warn', FAIL: 'bad' };
@@ -47,13 +47,16 @@ route('/reconciliation', async (main) => {
             <th style="min-width:110px">Difference</th>
             <th class="left" style="min-width:90px">Status</th>
           </tr></thead>
-          <tbody>${s.lines.map(l => `
+          <tbody>${s.lines.map((l, i) => `
             <tr>
               <td class="label left">${escapeHtml(l.label)}
                 <div class="muted mono" style="font-size:10.5px">${escapeHtml(l.excel_ref)}</div></td>
-              <td class="derived">${fmt.n(l.excel, 2)}</td>
-              <td class="derived">${fmt.n(l.platform, 2)}</td>
-              <td class="derived ${Math.abs(l.difference) > 0.01 ? 'missing' : ''}">${
+              <td class="derived clickable" data-line="${escapeHtml(s.name)}|${i}"
+                  title="Click for the working">${fmt.n(l.excel, 2)}</td>
+              <td class="derived clickable" data-line="${escapeHtml(s.name)}|${i}"
+                  title="Click for the working">${fmt.n(l.platform, 2)}</td>
+              <td class="derived clickable ${Math.abs(l.difference) > 0.01 ? 'missing' : ''}"
+                  data-line="${escapeHtml(s.name)}|${i}" title="Click for the working">${
                 Math.abs(l.difference) < 0.005 ? '—' : fmt.n(l.difference, 2)}</td>
               <td class="left"><span class="chip ${STATUS[l.status]}">${l.status}</span></td>
             </tr>
@@ -71,4 +74,50 @@ route('/reconciliation', async (main) => {
           ${r.warnings.map(w => `<div class="explain" style="padding-left:0">• ${escapeHtml(w)}</div>`).join('')}
         </div>
       </div>` : ''}`;
+
+  // Every figure on this screen opens its working. A reconciliation line is
+  // where the platform and the workbook are put side by side, so "why are
+  // these two numbers different" is precisely the question being asked, and
+  // clicking one should answer it rather than nothing.
+  const bySection = Object.fromEntries(sections.map(s => [s.name, s.lines]));
+
+  main.addEventListener('click', (e) => {
+    const td = e.target.closest('[data-line]');
+    if (!td) return;
+    const [section, index] = td.dataset.line.split('|');
+    const l = (bySection[section] || [])[Number(index)];
+    if (!l) return;
+
+    const agrees = Math.abs(l.difference) <= 0.01;
+    openPanel(`${l.label} — ${section}`, `
+      <div class="deriv-value">${fmt.n(l.platform, 2)}</div>
+      <div class="muted">what the platform computes</div>
+      <table class="kv" style="margin-top:10px"><tbody>
+        <tr><td>The workbook</td>
+            <td class="right mono">${fmt.n(l.excel, 2)}</td></tr>
+        <tr><td>The platform</td>
+            <td class="right mono">${fmt.n(l.platform, 2)}</td></tr>
+        <tr class="total-row"><td><strong>Difference</strong></td>
+            <td class="right mono"><strong>${fmt.n(l.difference, 2)}</strong></td></tr>
+        ${l.expected_delta !== null && l.expected_delta !== undefined ? `
+        <tr><td>Predicted difference</td>
+            <td class="right mono">${fmt.n(l.expected_delta, 2)}</td></tr>` : ''}
+      </tbody></table>
+      ${l.excel_ref ? `<div class="deriv-excel">In the workbook:
+        ${escapeHtml(l.excel_ref)}</div>` : ''}
+      ${l.explanation ? `<h4 class="deriv-h">Why they differ</h4>
+        <div class="deriv-note">${escapeHtml(l.explanation)}</div>` : ''}
+      <div class="deriv-note">${agrees
+        ? `<strong>PASS</strong> — identical to the paisa. The platform computes
+           this from the model rather than reading the cell, so agreeing is a
+           result, not a copy.`
+        : l.expected_delta !== null && l.expected_delta !== undefined
+          ? `<strong>EXPLAINED</strong> — the difference is exactly the size a
+             named defect predicts. An explained difference of the wrong size
+             fails as loudly as an unexplained one, so a bug cannot hide inside
+             this line.`
+          : `<strong>FAIL</strong> — a difference nobody predicted. Either the
+             platform is wrong, or the workbook is and the reason has not been
+             written down yet. Acceptance is blocked while this stands.`}</div>`);
+  });
 });

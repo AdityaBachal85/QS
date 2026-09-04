@@ -7,7 +7,7 @@
 
 import { api, fmt, route } from '../app.js';
 import { createGrid } from '../grid.js';
-import { escapeHtml, showDerivation } from '../panel.js';
+import { escapeHtml, showContributors, showDerivation } from '../panel.js';
 
 const STATUS = {
   priced: '', no_rate: 'bad', no_rule: 'warn', error: 'bad',
@@ -70,13 +70,26 @@ route('/takeoff', async (main) => {
       columns: [
         { key: 'unit_type', label: 'Unit type', kind: 'label', width: '140px' },
         { key: 'room', label: 'Room', kind: 'label', width: '170px' },
-        { key: 'finish', label: 'Finish', kind: 'derived', width: '160px', align: 'left' },
+        { key: 'finish', label: 'Finish', kind: 'note', width: '160px', align: 'left' },
         { key: 'total_qty', label: 'Quantity', kind: 'derived', dp: 2, width: '110px' },
-        { key: 'unit', label: 'Unit', kind: 'derived', width: '60px', align: 'left' },
-        { key: 'message', label: 'Why', kind: 'derived', width: '380px', align: 'left',
+        { key: 'unit', label: 'Unit', kind: 'note', width: '60px', align: 'left' },
+        { key: 'message', label: 'Why', kind: 'note', width: '380px', align: 'left',
           render: v => `<span class="muted">${escapeHtml(v)}</span>` },
       ],
       rows: t.unpriced,
+      onDerivedClick: async (row, col) => {
+        if (col.key !== 'total_qty') return false;
+        const full = await working(row);
+        showDerivation(`${row.room} — ${row.finish}`, row.total_qty,
+          full.gross_derivation, {
+            unit: row.unit,
+            extra: `<div class="deriv-note">${escapeHtml(row.message)}</div>
+              <div class="deriv-note">This quantity is real. It is the amount
+                beside it that is missing, and the two are not the same
+                thing.</div>`,
+          });
+        return true;
+      },
     });
   }
 
@@ -84,7 +97,7 @@ route('/takeoff', async (main) => {
     columns: [
       { key: 'label', label: 'Finish', kind: 'label', width: '230px' },
       { key: 'quantity', label: 'Quantity', kind: 'derived', dp: 2, width: '124px' },
-      { key: 'unit', label: 'Unit', kind: 'derived', width: '60px', align: 'left' },
+      { key: 'unit', label: 'Unit', kind: 'note', width: '60px', align: 'left' },
       { key: 'blended_rate', label: 'Blended rate', kind: 'derived', dp: 2, width: '116px',
         title: 'Amount ÷ quantity. The workbook prices its cost sheet on exactly this '
              + 'figure — a weighted average that exists in no rate list.' },
@@ -96,6 +109,8 @@ route('/takeoff', async (main) => {
     // below rather than listed, because a zero with no quantity behind it says
     // nothing -- and a zero *with* a quantity is the unpriced table above.
     rows: t.by_finish.filter(g => g.quantity || g.amount),
+    rowKey: r => r.key,
+    onDerivedClick: (row, col) => groupWorking(row, col, 'unit type'),
     footer: rows => ['<strong>Total</strong>', '', '', '', '',
                      `<strong>${fmt.money(rows.reduce((a, r) => a + r.amount, 0))}</strong>`],
   });
@@ -120,7 +135,46 @@ route('/takeoff', async (main) => {
         render: v => fmt.money(v) },
     ],
     rows: t.by_unit_type.filter(g => g.amount > 0 || g.unpriced),
+    rowKey: r => r.key,
+    onDerivedClick: (row, col) => groupWorking(row, col, 'finish'),
   });
+
+  /** A group row on either fold: what it is made of, or why a count is what it is. */
+  function groupWorking(row, col, brokenDownBy) {
+    const rows = t.contributors[row.key] || [];
+    if (col.key === 'blended_rate') {
+      showContributors(row, rows, {
+        title: 'blended rate',
+        extra: `<div class="deriv-expr">${fmt.money(row.amount)} ÷ ${
+          fmt.n(row.quantity, 2)} ${escapeHtml(row.unit || '')} = ₹${
+          fmt.n(row.blended_rate, 2)} per ${escapeHtml(row.unit || '')}</div>`,
+        note: `A weighted average across every room that carries this finish —
+          it exists in no rate list, and the workbook prices its cost sheet on
+          exactly this figure. Rooms priced at different rates pull it about,
+          which is why the rows above are worth reading.`,
+      });
+      return true;
+    }
+    if (col.key === 'unpriced') {
+      showContributors(row, rows, {
+        title: `${row.unpriced} unpriced line${row.unpriced === 1 ? '' : 's'}`,
+        note: `Measured here and reaching no rate. Their quantity is real and
+          their amount is missing rather than zero — that is the C-11 failure
+          this platform exists to stop, so they are listed in the table at the
+          top of this screen rather than quietly dropped.`,
+      });
+      return true;
+    }
+    if (['amount', 'quantity', 'lines'].includes(col.key)) {
+      showContributors(row, rows, {
+        note: `Broken down by ${brokenDownBy}. Each row is already multiplied by
+          how many units the building has. This is a filter over the same
+          take-off lines the table below uses, so the two cannot disagree.`,
+      });
+      return true;
+    }
+    return false;
+  }
 
   // -- every line, filterable ---------------------------------------------
   function drawLines() {
@@ -136,9 +190,9 @@ route('/takeoff', async (main) => {
       columns: [
         { key: 'unit_type', label: 'Unit type', kind: 'label', width: '130px' },
         { key: 'room', label: 'Room', kind: 'label', width: '160px' },
-        { key: 'finish', label: 'Finish', kind: 'derived', width: '150px', align: 'left' },
+        { key: 'finish', label: 'Finish', kind: 'note', width: '150px', align: 'left' },
         { key: 'net', label: 'Net / unit', kind: 'derived', dp: 3, width: '96px' },
-        { key: 'unit', label: 'Unit', kind: 'derived', width: '56px', align: 'left' },
+        { key: 'unit', label: 'Unit', kind: 'note', width: '56px', align: 'left' },
         { key: 'unit_count', label: '× units', kind: 'derived', dp: 0, width: '70px' },
         { key: 'total_qty', label: 'Total qty', kind: 'derived', dp: 2, width: '104px' },
         { key: 'rate', label: 'Rate', kind: 'derived', dp: 2, width: '96px',
@@ -171,6 +225,19 @@ route('/takeoff', async (main) => {
               <div class="deriv-expr">${fmt.n(row.net, 3)} ${escapeHtml(row.unit)}
                 × ${row.unit_count} units = ${fmt.n(row.total_qty, 2)}</div>` : '',
           });
+        } else if (col.key === 'unit_count') {
+          showDerivation(`${row.unit_type} — units this line covers`,
+            row.unit_count, null, {
+              format: v => `${v} unit${v === 1 ? '' : 's'}`,
+              extra: `<div class="deriv-note">Counted from the floor matrix in
+                Room Config, never typed.${row.floor_scope
+                  ? ` This line covers ${escapeHtml(row.floor_scope)}${
+                      row.floor_height_m
+                        ? `, measured at ${fmt.n(row.floor_height_m, 2)} m
+                           floor-to-floor` : ''}: a unit type on floors of more
+                     than one height is measured once per height rather than
+                     averaged into one wall.` : ''}</div>`,
+            });
         } else if (col.key === 'rate' || col.key === 'total_amount') {
           showDerivation(row.rate_description || row.finish, row.rate, full.rate_derivation, {
             unit: `per ${row.unit}`,
@@ -181,7 +248,10 @@ route('/takeoff', async (main) => {
                 × ₹${fmt.n(row.rate, 2)} = ${fmt.money(row.total_amount)}</div>`
               : `<div class="deriv-note">${escapeHtml(row.message)}</div>`,
           });
+        } else {
+          return false;
         }
+        return true;
       },
     });
   }

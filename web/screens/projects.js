@@ -5,7 +5,7 @@
 // copying is the important action here — and a copy rewrites every id, so the
 // two can never share a row and editing one cannot reach into the other.
 
-import { api, fmt, refresh, route, toast } from '../app.js';
+import { api, fmt, openPanel, refresh, route, toast } from '../app.js';
 import { createGrid } from '../grid.js';
 import { escapeHtml } from '../panel.js';
 
@@ -36,7 +36,7 @@ route('/projects', async (main) => {
         { key: 'name', label: 'Project', kind: 'label', width: '230px',
           render: (v, r) => `${escapeHtml(v)}${r.open
             ? ' <span class="tag ok">open</span>' : ''}` },
-        { key: 'city', label: 'City', kind: 'derived', width: '110px', align: 'left',
+        { key: 'city', label: 'City', kind: 'note', width: '110px', align: 'left',
           render: v => escapeHtml(v || '—') },
         { key: 'units', label: 'Units', kind: 'derived', dp: 0, width: '76px' },
         { key: 'rooms', label: 'Rooms', kind: 'derived', dp: 0, width: '76px' },
@@ -45,10 +45,10 @@ route('/projects', async (main) => {
         { key: 'health', label: 'Health', kind: 'derived', width: '92px',
           render: (v, r) => `<span class="tag ${r.blocking ? 'bad' : v >= 70 ? 'ok' : 'warn'}">${
             v ?? '—'}/100</span>` },
-        { key: 'updated_at', label: 'Last changed', kind: 'derived', width: '160px',
+        { key: 'updated_at', label: 'Last changed', kind: 'note', width: '160px',
           align: 'left',
           render: v => `<span class="muted">${v ? escapeHtml(v.replace('T', ' ').slice(0, 16)) : '—'}</span>` },
-        { key: '_open', label: '', kind: 'derived', width: '210px', align: 'left',
+        { key: '_open', label: '', kind: 'note', width: '210px', align: 'left',
           get: () => null,
           render: (v, r) => mayWrite ? `
             ${r.open ? '' : `<a class="link-quiet" data-act="open" data-id="${r.id}" href="#">open</a> · `}
@@ -60,6 +60,47 @@ route('/projects', async (main) => {
       rows,
       rowKey: r => r.id,
       shortcuts: false,
+      onDerivedClick: (row, col) => {
+        if (col.key === 'health') {
+          openPanel(`${row.name} — health`, `
+            <div class="deriv-value">${row.health ?? '—'}<span class="muted"
+              style="font-size:13px">/100</span></div>
+            <div class="deriv-expr">${row.blocking} blocking · scored down by
+              severity, capped per band</div>
+            <div class="deriv-note">100 less what the validation report finds:
+              blocking findings can take 60, warnings 30, information 10. Capped
+              per band so a hundred spelling notes cannot look like a broken
+              estimate, and one blocking finding cannot be lost in the noise.
+              ${row.open ? 'Open the <a href="#/validation">Validation</a> screen for the findings themselves.'
+                : 'Open this project to read the findings themselves.'}</div>
+            ${row.blocking ? `<div class="deriv-note">While anything is
+              blocking, this estimate cannot be issued.</div>` : ''}`);
+          return true;
+        }
+        if (col.key === 'cost_total') {
+          openPanel(`${row.name} — cost lines`, `
+            <div class="deriv-value">${row.cost_total ? fmt.money(row.cost_total)
+              : '<span class="muted">nothing yet</span>'}</div>
+            <div class="deriv-note">${row.cost_lines || 0} cost line${
+              row.cost_lines === 1 ? '' : 's'} — Preliminaries, Amenities,
+              External Development and the carried civil and MEP bands. This is
+              not the project total: the finishing take-off and the openings are
+              measured separately and added in the
+              ${row.open ? '<a href="#/summary">Cost summary</a>' : 'Cost summary'}.</div>`);
+          return true;
+        }
+        if (col.key === 'units' || col.key === 'rooms') {
+          openPanel(`${row.name} — ${col.key}`, `
+            <div class="deriv-value">${row[col.key]}</div>
+            <div class="deriv-note">${col.key === 'units'
+              ? `Counted from the floor matrix, common areas excluded — every
+                 floor's row added, never a typed total.`
+              : `Rooms across every unit type. A flat with four bathrooms and a
+                 flat with one are just different numbers of rows here.`}</div>`);
+          return true;
+        }
+        return false;
+      },
       emptyMessage: isArchived ? 'Nothing archived.' : 'No projects yet.',
     });
   }

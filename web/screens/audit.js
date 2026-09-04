@@ -23,14 +23,18 @@ route('/audit', async (main) => {
           <th style="min-width:110px">From</th>
           <th style="min-width:110px">To</th>
         </tr></thead>
+        <!-- "From" and "To" are recorded values, not calculations: what
+             somebody typed, before and after. They carry the note class so
+             they read as the record they are rather than inviting a click
+             with nothing behind it. -->
         <tbody>${rows.map(r => `
           <tr>
             <td class="label left mono" style="font-size:11px">${escapeHtml(r.at)}</td>
             <td class="label left">${escapeHtml(r.entity)}</td>
             <td class="label left mono" style="font-size:11px">${escapeHtml(r.entity_id)}</td>
             <td class="label left">${escapeHtml(r.field)}</td>
-            <td class="derived">${escapeHtml(r.old_value ?? '—')}</td>
-            <td class="derived">${escapeHtml(r.new_value ?? '—')}</td>
+            <td class="derived note">${escapeHtml(r.old_value ?? '—')}</td>
+            <td class="derived note">${escapeHtml(r.new_value ?? '—')}</td>
           </tr>`).join('')}</tbody>
       </table></div>`
       : '<div class="card-body muted">No changes yet. Edit something and it will appear here.</div>'}

@@ -32,6 +32,11 @@ class SectionTotal:
     lines: int
     carried: int = 0
     excel_ref: str = ""
+    #: What this band folds, line by line.  A section here is a *filter* over
+    #: the lines that name it, not a bounded range -- which is the structural
+    #: fix for C-38, where `Summary!D11` sums I118:I125 and the MEP band runs
+    #: to row 126, so Rs 24,00,000 of substation is computed and never carried.
+    derivation: "Derived | None" = None
 
     @property
     def is_carried(self) -> bool:
@@ -74,6 +79,7 @@ def project_summary(model: ProjectModel, params: ParameterSet,
     # Sections sharing a name are one band of the estimate -- Finishing comes
     # from both cost sheets -- so they fold together the way the Summary reads.
     merged: dict[str, SectionTotal] = {}
+    contributions: dict[str, list[tuple]] = {}
     for section in sorted(model.cost_sections, key=lambda s: (s.seq, s.code)):
         rows = [l for l in lines if l.line.section_id == section.id
                 and not l.is_heading]
@@ -86,6 +92,40 @@ def project_summary(model: ProjectModel, params: ParameterSet,
         entry.amount += section_total(lines, section.id)
         entry.lines += len(rows)
         entry.carried += sum(1 for l in rows if l.line.qty_carried)
+        contributions.setdefault(section.name, []).extend(
+            (l.line.description or l.line.id, l.amount, section.code,
+             bool(l.line.qty_carried), l.line.status)
+            for l in rows if l.amount)
+
+    # The biggest lines first: a section is read to find out what is in it,
+    # and twenty rows of rounding do not answer that. The tail is folded into
+    # one named term so the inputs still add to the section exactly.
+    for name, entry in merged.items():
+        rows = sorted(contributions.get(name, []), key=lambda c: -abs(c[1]))
+        inputs = []
+        for description, value, code, carried, status in rows[:12]:
+            source = code
+            if carried:
+                source += ", carried from a sheet not modelled here"
+            if status and status != "priced":
+                source += f", {status}"
+            inputs.append(Input(description, value, source))
+        rest = rows[12:]
+        if rest:
+            inputs.append(Input(f"{len(rest)} smaller line(s)",
+                                sum(c[1] for c in rest), "the rest of the band"))
+        entry.derivation = derive(
+            entry.amount, "section_total",
+            f"sum of {entry.lines} line(s) naming {name!r}", inputs,
+            excel_ref=entry.excel_ref,
+            note=(f"A filter over the lines that name this section, never a "
+                  f"range of rows. {entry.carried} of {entry.lines} carry a "
+                  f"quantity from a sheet not modelled here yet."
+                  if entry.carried else
+                  "A filter over the lines that name this section, never a "
+                  "range of rows -- so a line added at the foot of the band is "
+                  "counted because it names the band, not because somebody "
+                  "widened a SUM (C-38)."))
 
     summary = ProjectSummary(sections=list(merged.values()))
     summary.subtotal = sum(s.amount for s in summary.sections)

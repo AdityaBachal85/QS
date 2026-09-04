@@ -95,7 +95,7 @@ route('/rates', async (main) => {
         return api.put(`/rates/${row.id}`, { [col.key]: v });
       },
       onDerivedClick: (row, col) => {
-        if (col.key !== 'overall_rate') return;
+        if (col.key !== 'overall_rate') return false;
         showDerivation(row.description, row.overall_rate, row.derivation, {
           unit: `per ${row.unit}`,
           format: v => v === null ? '— no rate' : `₹${fmt.n(v, 4)}`,
@@ -103,6 +103,7 @@ route('/rates', async (main) => {
             This item has no price components. It computes to zero, which is not the same as
             costing nothing — the estimate cannot be issued while it stays this way.</div>`,
         });
+        return true;
       },
     });
   }

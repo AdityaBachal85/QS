@@ -67,7 +67,7 @@ route('/summary', async (main) => {
     columns: [
       { key: 'name', label: 'Section', kind: 'label', width: '220px' },
       { key: 'lines', label: 'Lines', kind: 'derived', dp: 0, width: '76px' },
-      { key: '_source', label: 'Quantities', kind: 'derived', width: '150px',
+      { key: '_source', label: 'Quantities', kind: 'note', width: '150px',
         align: 'left',
         title: 'Derived means the platform computes the quantity. Carried means '
              + 'it came across from a sheet not modelled here yet.',
@@ -75,7 +75,7 @@ route('/summary', async (main) => {
         render: v => v === 'carried'
           ? '<span class="tag warn">carried across</span>'
           : '<span class="tag ok">derived here</span>' },
-      { key: 'excel_ref', label: 'In the workbook', kind: 'derived', width: '250px',
+      { key: 'excel_ref', label: 'In the workbook', kind: 'note', width: '250px',
         align: 'left',
         render: v => `<span class="muted mono">${escapeHtml(v || '—')}</span>` },
       { key: 'amount', label: 'Amount', kind: 'derived', width: '150px', total: true,
@@ -84,6 +84,37 @@ route('/summary', async (main) => {
     rows: s.sections,
     rowKey: r => r.id,
     shortcuts: false,
+    onDerivedClick: (row, col) => {
+      if (col.key === 'amount') {
+        showDerivation(`${row.name} — section total`, row.amount, row.derivation, {
+          format: v => fmt.money(v),
+          extra: `<div class="deriv-note">${row.is_carried
+            ? `Every quantity in this section is carried across from a sheet
+               this platform has not modelled yet, with its source cell
+               attached. The rate and the arithmetic are real; the quantity
+               was not recomputed here.`
+            : `Each line here is quantity × rate, computed by the engine, and
+               reconciles to its sheet to the paisa.`}</div>
+            <h4 class="deriv-h">Where this goes</h4>
+            <div class="deriv-note">Into the section subtotal, then escalation
+              and contingency on top of that, then GST on the result. Click the
+              project total below to see those three steps.</div>`,
+        });
+        return true;
+      }
+      if (col.key === 'lines') {
+        showDerivation(`${row.name} — lines`, row.lines, row.derivation, {
+          format: v => `${v} line${v === 1 ? '' : 's'}`,
+          extra: `<div class="deriv-note">${row.carried} of them carry a
+            quantity from a sheet not modelled here. A section is a filter over
+            the lines that name it, so a line added at the foot of the band is
+            counted because it names the band — never because somebody widened
+            a SUM.</div>`,
+        });
+        return true;
+      }
+      return false;
+    },
     footer: rows => [
       '<strong>Subtotal</strong>', '', '', '',
       `<strong>${fmt.money(rows.reduce((a, r) => a + r.amount, 0))}</strong>`,

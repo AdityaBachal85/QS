@@ -9,7 +9,7 @@
 // The importer proposes; nobody's guess is treated as a decision. Each link
 // stays flagged until somebody here agrees with it.
 
-import { api, fmt, refresh, route } from '../app.js';
+import { api, fmt, openPanel, refresh, route } from '../app.js';
 import { createGrid } from '../grid.js';
 import { escapeHtml } from '../panel.js';
 
@@ -55,7 +55,7 @@ route('/mapping', async (main) => {
   createGrid(document.getElementById('grid'), {
     columns: [
       { key: 'name', label: 'Room type (sizes sheet)', kind: 'label', width: '210px' },
-      { key: 'category', label: 'Category', kind: 'derived', width: '100px', align: 'left',
+      { key: 'category', label: 'Category', kind: 'note', width: '100px', align: 'left',
         render: v => `<span class="tag">${escapeHtml(v)}</span>` },
       { key: 'rooms', label: 'Rooms', kind: 'derived', dp: 0, width: '70px' },
       { key: 'prices_as_id', label: 'Priced as (rate list)', kind: 'select', width: '210px',
@@ -67,7 +67,7 @@ route('/mapping', async (main) => {
         title: 'What this room type costs on the link as it stands. Agreeing does '
              + 'not change it — the rooms are already priced this way.',
         render: v => (v ? fmt.money(v) : '<span class="muted">—</span>') },
-      { key: 'confirmed', label: 'Agreed', kind: 'derived', width: '130px', align: 'left',
+      { key: 'confirmed', label: 'Agreed', kind: 'note', width: '130px', align: 'left',
         render: (v, r) => v
           ? '<span class="tag ok">confirmed</span>'
           : (r.prices_as_id
@@ -79,6 +79,47 @@ route('/mapping', async (main) => {
     onCommit: (row, col, value) =>
       api.put(`/room-type-mapping/${row.id}`,
         { prices_as_id: value || null, confirmed: true }),
+    onDerivedClick: (row, col) => {
+      if (col.key === 'amount') {
+        const from = row.worth_from || [];
+        openPanel(`${row.name} — currently worth`, `
+          <div class="deriv-value">${row.amount ? fmt.money(row.amount)
+            : '<span class="muted">nothing yet</span>'}</div>
+          <div class="muted">${row.prices_as
+            ? `priced as “${escapeHtml(row.prices_as)}”`
+            : row.own_schedule ? 'priced on its own schedule'
+            : 'no rate block reaches this room type'}</div>
+          ${from.length ? `<h4 class="deriv-h">Spread across</h4>
+            <table class="kv"><tbody>${from.map(u => `
+              <tr><td>${escapeHtml(u.label)}</td>
+                  <td class="right mono">${u.lines} line${u.lines === 1 ? '' : 's'}</td>
+                  <td class="right mono">${fmt.money(u.amount)}</td></tr>`).join('')}
+            </tbody></table>` : ''}
+          <div class="deriv-note">${row.rooms} room${row.rooms === 1 ? '' : 's'}
+            of this type in the building, carrying ${row.finishes} finish${
+            row.finishes === 1 ? '' : 'es'}. This is what the link costs as it
+            stands — agreeing to it changes nothing, because the rooms are
+            already priced this way. Change the dropdown and this figure moves.</div>`);
+        return true;
+      }
+      if (col.key === 'rooms' || col.key === 'finishes') {
+        openPanel(`${row.name} — ${col.key}`, `
+          <div class="deriv-value">${row[col.key]}</div>
+          <div class="deriv-note">${col.key === 'rooms'
+            ? `Rooms of this type across every unit type — counted from the
+               sizes sheets, not typed. Each one is priced through the link in
+               the dropdown beside it.`
+            : row.finishes
+              ? `Rows in the finish schedule that reaches this room type,
+                 through “${escapeHtml(row.prices_as || row.name)}”. Each one
+                 becomes a take-off line for every room of this type.`
+              : `No finish schedule reaches this room type, so its rooms are
+                 measured and cost nothing. That is a gap, not a zero — pick a
+                 rate block in the dropdown to close it.`}</div>`);
+        return true;
+      }
+      return false;
+    },
   });
 
   const button = document.getElementById('confirmAll');

@@ -88,11 +88,39 @@ def room_config(model: ProjectModel) -> dict[str, Any]:
              "floor_type": f.floor_type.value,
              "counts": {u.id: mix.get((f.id, u.id), 0) for u in types},
              "row_total": sum(mix.get((f.id, u.id), 0) for u in types
-                              if not u.is_common_area)}
+                              if not u.is_common_area),
+             "row_total_derivation": _floor_total(f, types, mix)}
             for f in sorted(model.floors, key=lambda f: f.seq)
         ],
         "classification": model.counts_by_classification(),
     }
+
+
+def _floor_total(floor, types, mix) -> dict[str, Any]:
+    """The units on one floor: a fold across the row, common areas excluded.
+
+    Common areas are excluded and *named* as excluded rather than silently
+    dropped -- a lobby is on the floor, it is just not a unit anybody buys.
+    """
+    from qs_engine.provenance import Input, derive
+
+    inputs = [Input(u.code, mix.get((floor.id, u.id), 0),
+                    "counted from the floor matrix")
+              for u in types
+              if not u.is_common_area and mix.get((floor.id, u.id), 0)]
+    excluded = [u.code for u in types
+                if u.is_common_area and mix.get((floor.id, u.id), 0)]
+    total = sum(i.value for i in inputs)
+    return _derivation(derive(
+        total, "units_on_floor",
+        " + ".join(f"{i.value:g}" for i in inputs) or "0", inputs,
+        note=("Common areas on this floor are not counted as units: "
+              + ", ".join(excluded) + ". They keep their count and are "
+              "excluded by name, never by multiplying by zero."
+              if excluded else
+              "Every unit type on this floor, added. The BHK split elsewhere "
+              "is a group-by over this same matrix, so it cannot go stale the "
+              "way Room Conf!L44 did (C-21).")))
 
 
 def unit_types(model: ProjectModel, params: ParameterSet) -> list[dict[str, Any]]:
@@ -271,12 +299,35 @@ def kitchen_platforms(model: ProjectModel, params: ParameterSet,
     return {"rooms": rows}
 
 
+def _opening_area(line) -> dict[str, Any]:
+    """Width x height, said out loud.
+
+    A one-step calculation still deserves its working: it is the difference
+    between "1.89" and "1.20 x 1.575, the leaf as scheduled".
+    """
+    from qs_engine.provenance import Input, derive
+    return _derivation(derive(
+        line.width_m * line.height_m, "opening_area",
+        f"{line.width_m:g} x {line.height_m:g}",
+        [Input("width", line.width_m, "on the opening type"),
+         Input("height", line.height_m, "on the opening type")],
+        note="The leaf as scheduled. What is deducted from a wall is this area "
+             "times the number in the room; what is deducted from skirting is "
+             "the width alone, because a running metre takes a running-metre "
+             "deduction (C-35)."))
+
+
 def openings(model: ProjectModel) -> dict[str, Any]:
     """The door and window schedule -- a query, not a bounded range (C-18)."""
     def lines(kinds):
         return [{"code": l.code, "kind": l.kind.value, "width_m": l.width_m,
                  "height_m": l.height_m, "count": l.count,
-                 "quantity": l.quantity, "unit": l.unit}
+                 "quantity": l.quantity, "unit": l.unit,
+                 "count_derivation": _derivation(l.count_derivation)
+                 if l.count_derivation else None,
+                 "quantity_derivation": _derivation(l.quantity_derivation)
+                 if l.quantity_derivation else None,
+                 "area_derivation": _opening_area(l)}
                 for l in opening_schedule(model, kinds)]
 
     return {
@@ -323,6 +374,42 @@ def rates(model: ProjectModel, params: ParameterSet) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 # The finishing take-off -- where quantities meet rates
 # --------------------------------------------------------------------------
+
+def _contributors(lines) -> dict[str, list[dict[str, Any]]]:
+    """What each group on a totals screen is made of.
+
+    Every fold is a filter over the same take-off lines, so a group's working
+    is simply the lines that matched it, gathered by whichever dimension the
+    group does *not* already fix: a finish breaks down by unit type, a unit
+    type by finish. Keyed the way each grid keys its rows, so a screen can look
+    a group up by the row it drew.
+    """
+    out: dict[str, list[dict[str, Any]]] = {}
+
+    def gather(key_of, breakdown_by):
+        for line in lines:
+            per = out.setdefault(key_of(line), [])
+            label = breakdown_by(line)
+            entry = next((e for e in per if e["label"] == label), None)
+            if entry is None:
+                entry = {"label": label, "quantity": 0.0, "amount": 0.0,
+                         "unit": line.unit, "lines": 0}
+                per.append(entry)
+            entry["quantity"] += line.total_qty
+            entry["amount"] += line.total_amount
+            entry["lines"] += 1
+            if entry["unit"] != line.unit:
+                entry["unit"] = ""      # mixed units do not add
+
+    gather(lambda l: l.finish_slot_id, lambda l: l.unit_type_code)
+    gather(lambda l: l.room_type_id, lambda l: l.unit_type_code)
+    gather(lambda l: l.unit_type_id, lambda l: l.finish_name)
+    gather(lambda l: f"{l.finish_slot_id}|{l.room_type_id}",
+           lambda l: l.unit_type_code)
+    for per in out.values():
+        per.sort(key=lambda e: -e["amount"])
+    return out
+
 
 def _line_json(line, *, working: bool = False) -> dict[str, Any]:
     """One take-off line.
@@ -396,6 +483,7 @@ def takeoff(model: ProjectModel, params: ParameterSet,
         "lines": [_line_json(l) for l in lines],
         "by_finish": _group_json(by_finish(lines, params)),
         "by_unit_type": _group_json(by_unit_type(lines, params)),
+        "contributors": _contributors(lines),
         "total": total_amount(lines),
         "line_count": len(lines),
         "priced_count": sum(1 for l in lines if l.is_priced),
@@ -437,7 +525,21 @@ def room_type_mapping(model: ProjectModel,
 
     # What each link is currently worth, so agreeing to one is an informed
     # decision rather than a shrug.
-    worth = {g.key: g.amount for g in by_room_type(compute_takeoff(model, params))}
+    takeoff_lines = compute_takeoff(model, params)
+    worth = {g.key: g.amount for g in by_room_type(takeoff_lines)}
+    #: Which unit types make up that figure, so "currently worth Rs 84 lakh"
+    #: can be read back as the flats it is spread across.
+    worth_from: dict[str, list[dict[str, Any]]] = {}
+    for line in takeoff_lines:
+        if not line.is_priced:
+            continue
+        entry = worth_from.setdefault(line.room_type_id, {})
+        row = entry.setdefault(line.unit_type_id, {
+            "label": line.unit_type_code, "amount": 0.0, "lines": 0})
+        row["amount"] += line.total_amount
+        row["lines"] += 1
+    worth_by_unit = {k: sorted(v.values(), key=lambda r: -r["amount"])
+                     for k, v in worth_from.items()}
 
     out = []
     for room_type in sorted(model.room_types, key=lambda t: t.name):
@@ -455,6 +557,7 @@ def room_type_mapping(model: ProjectModel,
             "own_schedule": room_type.id in priced,
             "finishes": len(model.finish_spec_for(room_type.id)),
             "amount": worth.get(room_type.id, 0.0),
+            "worth_from": worth_by_unit.get(room_type.id, []),
         })
     return out
 
@@ -505,17 +608,72 @@ def opening_costs(model: ProjectModel, params: ParameterSet) -> dict[str, Any]:
             "rate_item_id": l.rate_item_id,
             "rate_description": l.rate_description,
             "amount": l.amount, "status": l.status, "message": l.message,
+            "count_derivation": _derivation(l.count_derivation)
+            if l.count_derivation else None,
+            "quantity_derivation": _derivation(l.quantity_derivation)
+            if l.quantity_derivation else None,
+            "rate_derivation": _derivation(l.rate_derivation)
+            if l.rate_derivation else None,
+            "amount_derivation": _derivation(l.amount_derivation)
+            if l.amount_derivation else None,
+            "area_derivation": _opening_area(l),
         } for l in lines],
-        "bands": [{
-            "key": b.key, "label": b.label, "unit": b.unit, "count": b.count,
-            "quantity": b.quantity, "amount": b.amount, "lines": b.lines,
-            "unpriced": b.unpriced,
-        } for b in opening_totals(model, params)],
+        "bands": _opening_bands(model, params, lines),
         "total": total_opening_amount(model, params),
         "total_count": sum(l.count for l in lines),
         "unpriced": [{"code": l.code, "message": l.message}
                      for l in lines if not l.is_priced],
     }
+
+
+def _opening_bands(model: ProjectModel, params: ParameterSet,
+                   lines) -> list[dict[str, Any]]:
+    """Doors, windows, railings -- each band with the types that make it up."""
+    from qs_engine.provenance import Input, derive
+    from qs_engine.rules.schedule import BANDS
+
+    by_kind: dict[str, list] = {}
+    for line in lines:
+        by_kind.setdefault(line.kind.value, []).append(line)
+
+    out = []
+    for band in opening_totals(model, params):
+        kinds = next((k for key, _, k in BANDS if key == band.key), ())
+        members = [l for k in kinds for l in by_kind.get(k.value, [])]
+        members.sort(key=lambda l: -l.amount)
+        out.append({
+            "key": band.key, "label": band.label, "unit": band.unit,
+            "count": band.count, "quantity": band.quantity,
+            "amount": band.amount, "lines": band.lines,
+            "unpriced": band.unpriced,
+            "count_derivation": _derivation(derive(
+                band.count, "band_count",
+                " + ".join(f"{l.count:g}" for l in members) or "0",
+                [Input(l.code, l.count,
+                       f"{l.width_m:g} x {l.height_m:g} m") for l in members],
+                excel_ref="Doors!L141 = SUBTOTAL(9,L5:L140)",
+                note="A filter over every opening type of this kind, folded up "
+                     "through the rooms that carry them. The workbook's own "
+                     "count and its schedule disagree -- Doors!E141 says 58 "
+                     "where L141 says 2,180 -- because they were two sums over "
+                     "two ranges. Here the count and the money come from one "
+                     "fold, so they cannot part company (C-12).")),
+            "amount_derivation": _derivation(derive(
+                band.amount, "band_amount",
+                " + ".join(f"{l.amount:,.0f}" for l in members if l.amount) or "0",
+                [Input(l.code, l.amount,
+                       (f"{l.count:g} @ {l.rate:g} per {l.rate_unit}"
+                        if l.rate else l.message or "no rate"))
+                 for l in members],
+                note=("Every type of this kind priced on what it is bought by: "
+                      "a door by the leaf, glazing by the square metre, railing "
+                      "by the running metre."
+                      + (f" {band.unpriced} type(s) here are measured and carry "
+                         f"no price, so their quantity is real and their amount "
+                         f"is missing rather than zero (C-11)."
+                         if band.unpriced else "")))),
+        })
+    return out
 
 
 def finish_totals(model: ProjectModel, params: ParameterSet) -> dict[str, Any]:
@@ -535,18 +693,7 @@ def finish_totals(model: ProjectModel, params: ParameterSet) -> dict[str, Any]:
     carpet = sum(unit_type_area_sqft(u.id, model, params).value * model.unit_count(u.id)
                  for u in model.unit_types if not u.is_common_area)
 
-    contributors: dict[str, list[dict[str, Any]]] = {}
-    for group in by_finish(lines, params):
-        rows = [l for l in lines if l.finish_slot_id == group.key]
-        per_unit: dict[str, dict[str, Any]] = {}
-        for line in rows:
-            entry = per_unit.setdefault(line.unit_type_id, {
-                "unit_type_id": line.unit_type_id, "label": line.unit_type_code,
-                "quantity": 0.0, "amount": 0.0, "unit": line.unit})
-            entry["quantity"] += line.total_qty
-            entry["amount"] += line.total_amount
-        contributors[group.key] = sorted(per_unit.values(),
-                                         key=lambda e: -e["amount"])
+    contributors = _contributors(lines)
 
     return {
         "by_finish": _group_json(by_finish(lines, params)),
@@ -638,7 +785,9 @@ def project_summary(model: ProjectModel, params: ParameterSet) -> dict[str, Any]
         "sections": [{"id": x.id, "code": x.code, "name": x.name,
                       "amount": x.amount, "lines": x.lines,
                       "carried": x.carried, "is_carried": x.is_carried,
-                      "excel_ref": x.excel_ref} for x in s.sections],
+                      "excel_ref": x.excel_ref,
+                      "derivation": _derivation(x.derivation)
+                      if x.derivation else None} for x in s.sections],
         "subtotal": s.subtotal,
         "uplifts": [{"code": u.code, "label": u.label, "rate": u.rate,
                      "amount": u.amount, "basis": u.basis} for u in s.uplifts],

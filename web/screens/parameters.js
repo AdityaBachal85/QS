@@ -31,8 +31,8 @@ route('/parameters', async (main) => {
     columns: [
       { key: 'key', label: 'Parameter', kind: 'label', width: '190px' },
       { key: 'value', label: 'Value', kind: 'input', dp: 4, width: '110px' },
-      { key: 'unit', label: 'Unit', kind: 'derived', width: '92px', align: 'left' },
-      { key: 'description', label: 'What it is', kind: 'derived', width: '420px', align: 'left',
+      { key: 'unit', label: 'Unit', kind: 'note', width: '92px', align: 'left' },
+      { key: 'description', label: 'What it is', kind: 'note', width: '420px', align: 'left',
         render: v => v
           ? `<span class="muted">${escapeHtml(v)}</span>`
           : '<span class="tag warn">no description — nobody knows what this is</span>' },
@@ -42,12 +42,14 @@ route('/parameters', async (main) => {
              + 'cannot answer at all.',
         get: () => null,
         render: () => '<a class="link-quiet" href="#">where is this used?</a>' },
-      { key: 'source', label: 'From', kind: 'derived', width: '250px', align: 'left',
+      { key: 'source', label: 'From', kind: 'note', width: '250px', align: 'left',
         render: v => `<span class="muted mono" style="font-size:11px">${escapeHtml(v || '')}</span>` },
     ],
     rows: params,
     onDerivedClick: (row, col) => {
-      if (col.key === '_used') showUsage('parameter', row.key, row.key);
+      if (col.key !== '_used') return false;
+      showUsage('parameter', row.key, row.key);
+      return true;
     },
     reload: refresh,
     onCommit: (row, col, value) => api.put(`/parameters/${row.key}`, { value }),

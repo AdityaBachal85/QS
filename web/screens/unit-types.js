@@ -59,9 +59,40 @@ function renderList(main, types, ref) {
       api.send('PATCH', `/collections/unit-types/${row.id}`, { [col.key]: value }),
     onDerivedClick: (row, col) => {
       if (col.key === 'total_sqft') {
-        showDerivation(`${row.code} — total carpet area`, row.total_sqft, row.derivation,
-          { unit: 'sq.ft' });
+        showDerivation(`${row.code} — total carpet area`, row.total_sqft,
+          row.derivation, {
+            unit: 'sq.ft',
+            extra: `<div class="deriv-note">Every room in this type added, then
+              multiplied by the ${row.count} of them the building holds —
+              counted from the floor matrix in Room Config, never typed. Click
+              the type to see the rooms it is made of.</div>`,
+          });
+        return true;
       }
+      if (col.key === 'area_sqm' || col.key === 'area_sqft') {
+        showDerivation(`${row.code} — carpet area of one unit`, row[col.key],
+          row.derivation, {
+            unit: col.key === 'area_sqm' ? 'sq.m' : 'sq.ft',
+            extra: `<div class="deriv-note">The rooms in this type, added. In
+              square feet it is converted with the project's own factor of
+              10.764 — a named parameter, not a number typed into a
+              formula.</div>`,
+          });
+        return true;
+      }
+      if (col.key === 'rooms' || col.key === 'count') {
+        openPanel(`${row.code} — ${col.key === 'rooms' ? 'rooms' : 'units'}`, `
+          <div class="deriv-value">${row[col.key]}</div>
+          <div class="deriv-note">${col.key === 'rooms'
+            ? `Rows in this type's room list. A flat with four bathrooms and a
+               flat with one are just different numbers of rows — nothing here
+               assumes a shape.`
+            : `Counted from the floor matrix in Room Config: every floor that
+               carries this type, added. Change a cell there and this moves,
+               along with every quantity measured for it.`}</div>`);
+        return true;
+      }
+      return false;
     },
   });
 }
@@ -122,7 +153,7 @@ async function renderRooms(main, ref, id) {
         options: ref.room_types,
         title: 'Chosen from the room-type master — never typed, so the same room '
              + 'cannot be spelled two ways.' },
-      { key: 'category', label: 'Category', kind: 'derived', width: '92px', align: 'left',
+      { key: 'category', label: 'Category', kind: 'note', width: '92px', align: 'left',
         render: v => `<span class="tag">${escapeHtml(v)}</span>` },
       { key: 'count_per_unit', label: 'Nos', kind: 'input', dp: 0, width: '54px' },
       { key: 'carpet_area_sqm', label: 'Area', unit: 'sq.m', kind: 'input', dp: 2, width: '84px' },
@@ -167,11 +198,25 @@ async function renderRooms(main, ref, id) {
       api.send('PATCH', `/collections/rooms/${row.id}`, { [col.key]: value }),
     onDerivedClick: (row, col) => {
       if (col.key === 'area_sqft') {
-        showDerivation(`${row.label} — area`, row.area_sqft, row.derivation, { unit: 'sq.ft' });
-        return;
+        showDerivation(`${row.label} — area`, row.area_sqft, row.derivation,
+          { unit: 'sq.ft' });
+        return true;
+      }
+      if (col.key === 'total_sqft') {
+        showDerivation(`${row.label} — all ${row.count_per_unit} of them`,
+          row.total_sqft, row.derivation, {
+            unit: 'sq.ft',
+            extra: `<div class="deriv-expr">${fmt.n(row.area_sqft, 4)} sq.ft ×
+              ${row.count_per_unit} in this unit = ${fmt.n(row.total_sqft, 4)}</div>
+              <div class="deriv-note">Per unit of ${escapeHtml(u.code)}. The
+              building has ${u.count} of them, and the take-off multiplies
+              again there rather than here.</div>`,
+          });
+        return true;
       }
       const rule = { _wall: 'wall_finish', _dado: 'dado', _skirting: 'skirting' }[col.key];
-      if (rule) showQuantity(row, rule, data);
+      if (rule) { showQuantity(row, rule, data); return true; }
+      return false;
     },
   });
 
@@ -212,6 +257,24 @@ async function renderRooms(main, ref, id) {
     onDelete: row => api.send('DELETE', `/collections/room-openings/${row.id}`),
     onCommit: (row, col, value) =>
       api.send('PATCH', `/collections/room-openings/${row.id}`, { [col.key]: value }),
+    onDerivedClick: (row, col) => {
+      if (col.key !== 'width_m' && col.key !== 'height_m') return false;
+      openPanel(`${row.code} in ${row.room_label} — ${
+        col.key === 'width_m' ? 'width' : 'height'}`, `
+        <div class="deriv-value">${fmt.n(row[col.key], 2)}
+          <span class="muted" style="font-size:13px">m</span></div>
+        <div class="deriv-expr">${fmt.n(row.width_m, 2)} × ${fmt.n(row.height_m, 2)}
+          = ${fmt.n(row.width_m * row.height_m, 4)} sq.m per leaf</div>
+        <div class="deriv-note">From the opening type
+          <strong>${escapeHtml(row.code)}</strong>, not typed here — change it on
+          <a href="#/openings">Doors &amp; Windows</a> and every room carrying
+          this type moves together. That is what stops the same door being
+          1.20 m wide in one room and 1.2 in another.</div>
+        <div class="deriv-note">Wall finishes deduct the full area × ${row.count};
+          skirting deducts the <strong>width</strong> alone, because a running
+          metre takes a running-metre deduction (C-35).</div>`);
+      return true;
+    },
   });
 
   // -- quantities and what they cost --------------------------------------
@@ -260,7 +323,7 @@ async function renderRooms(main, ref, id) {
           // and the workbook cell it replaces.
           const at = (what) => `data-cost="${ri}:${i}:${what}"`;
           const cell = (what, inner, cls) =>
-            `<td class="derived ${cls || ''} clickable" ${at(what)}
+            `<td class="derived clickable ${cls || ''}" ${at(what)}
                 title="Click for the working">${inner}</td>`;
           return `
           <tr>
@@ -502,7 +565,7 @@ async function renderKitchen(unitTypeId, u) {
         openPanel(`${row.room_label} — dado ${which} the counter`,
           `<div class="deriv-note">${escapeHtml(row.message
             || 'No counters entered for this room yet.')}</div>`);
-        return;
+        return true;
       }
       showDerivation(`${row.room_label} — dado ${which} the counter`,
         row[col.key], derivation, {
@@ -516,6 +579,7 @@ async function renderKitchen(unitTypeId, u) {
             and the plaster on this wall is what is left once both dado areas
             are taken off — you do not plaster behind the tiles.</div>`,
         });
+      return true;
     },
   });
 }

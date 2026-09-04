@@ -8,7 +8,7 @@
 
 import { api, fmt, refresh, route } from '../app.js';
 import { createGrid } from '../grid.js';
-import { escapeHtml } from '../panel.js';
+import { escapeHtml, showDerivation } from '../panel.js';
 
 route('/room-config', async (main) => {
   const [data, ref] = await Promise.all([
@@ -72,6 +72,19 @@ route('/room-config', async (main) => {
       ...shown.map(u => `<span class="mono">${u.total}</span>`),
       `<span class="mono">${rows.reduce((a, r) => a + r.row_total, 0)}</span>`, '',
     ],
+    onDerivedClick: (row, col) => {
+      if (col.key !== 'row_total') return false;
+      showDerivation(`${row.name} — units on this floor`, row.row_total,
+        row.row_total_derivation, {
+          format: v => `${v} unit${v === 1 ? '' : 's'}`,
+          extra: `<div class="deriv-note">Change a cell in this row and the
+            figure moves, along with the BHK split at the top of the screen and
+            every quantity measured for a unit on this floor. Nothing here is
+            stored — it is counted from the matrix each time it is asked
+            for.</div>`,
+        });
+      return true;
+    },
     onCommit: async (row, col, value) => {
       if (['name', 'floor_to_floor_ht', 'floor_type'].includes(col.key)) {
         await api.send('PATCH', `/collections/floors/${row.id}`, { [col.key]: value });

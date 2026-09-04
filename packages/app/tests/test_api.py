@@ -366,3 +366,101 @@ def test_the_counters_survive_a_round_trip_through_the_store(client):
     assert len(saved.kitchen_platforms) == 17
     assert all(p.main_platform_m or p.service_platform_m
                for p in saved.kitchen_platforms)
+
+
+# -- every figure carries its working --------------------------------------
+
+def test_every_opening_line_can_explain_its_count_and_quantity(client):
+    """C-18: the count is a fold over the rooms, and says which rooms."""
+    data = client.get("/api/openings").json()
+    for line in data["doors"] + data["windows"]:
+        assert line["count_derivation"], f"{line['code']} cannot explain its count"
+        working = line["count_derivation"]
+        assert working["inputs"], f"{line['code']} names no contributing room"
+        assert sum(i["value"] for i in working["inputs"]) == pytest.approx(
+            line["count"]), f"{line['code']}'s inputs do not add to its count"
+        assert line["quantity_derivation"]
+        assert line["area_derivation"]["expression"] == (
+            f"{line['width_m']:g} x {line['height_m']:g}")
+
+
+def test_every_priced_opening_can_explain_its_rate_and_amount(client):
+    costs = client.get("/api/opening-totals").json()
+    priced = [l for l in costs["lines"] if l["status"] == "priced"]
+    assert priced
+    for line in priced:
+        assert line["rate_derivation"], f"{line['code']} cannot explain its rate"
+        assert line["amount_derivation"]
+        # The amount's working must reproduce the amount, not merely mention it.
+        values = [i["value"] for i in line["amount_derivation"]["inputs"]]
+        assert len(values) == 2
+        assert values[0] * values[1] == pytest.approx(line["amount"], rel=1e-6)
+
+
+def test_an_opening_band_explains_which_types_make_it_up(client):
+    costs = client.get("/api/opening-totals").json()
+    for band in costs["bands"]:
+        assert band["count_derivation"] and band["amount_derivation"]
+        counts = band["count_derivation"]["inputs"]
+        assert sum(i["value"] for i in counts) == pytest.approx(band["count"])
+        amounts = band["amount_derivation"]["inputs"]
+        assert sum(i["value"] for i in amounts) == pytest.approx(
+            band["amount"], rel=1e-6)
+
+
+def test_every_summary_section_explains_what_it_folds(client):
+    """C-38: a section is a filter, and its working says what matched."""
+    s = client.get("/api/summary").json()
+    for section in s["sections"]:
+        assert section["derivation"], f"{section['name']} has no working"
+        inputs = section["derivation"]["inputs"]
+        assert sum(i["value"] for i in inputs) == pytest.approx(
+            section["amount"], rel=1e-6), (
+            f"{section['name']}'s working does not add to its amount")
+        assert "filter" in section["derivation"]["note"]
+
+
+def test_every_floor_explains_how_many_units_it_holds(client):
+    config = client.get("/api/room-config").json()
+    for floor in config["floors"]:
+        working = floor["row_total_derivation"]
+        assert working
+        assert sum(i["value"] for i in working["inputs"]) == pytest.approx(
+            floor["row_total"])
+
+
+def test_a_room_type_mapping_says_what_its_worth_is_made_of(client):
+    rows = client.get("/api/room-type-mapping").json()["mappings"]
+    priced = [r for r in rows if r["amount"]]
+    assert priced
+    for row in priced:
+        assert row["worth_from"], f"{row['name']} cannot say where its money is"
+        assert sum(u["amount"] for u in row["worth_from"]) == pytest.approx(
+            row["amount"], rel=1e-6)
+
+
+def test_every_group_on_a_totals_screen_can_be_opened(client):
+    """Not just the one fold that happened to have a handler."""
+    for route, folds in (("/api/finish-totals",
+                          ("by_finish", "by_room_type", "by_unit_type", "matrix")),
+                         ("/api/takeoff", ("by_finish", "by_unit_type"))):
+        payload = client.get(route).json()
+        assert payload["contributors"]
+        for fold in folds:
+            for group in payload[fold]:
+                if not (group["amount"] or group["quantity"]):
+                    continue
+                rows = payload["contributors"].get(group["key"])
+                assert rows, f"{route} {fold} {group['label']} has no breakdown"
+                assert sum(r["amount"] for r in rows) == pytest.approx(
+                    group["amount"], rel=1e-6)
+
+
+def test_a_reconciliation_line_carries_the_delta_it_predicted(client):
+    """An EXPLAINED line must be able to show the size it was predicted to be."""
+    r = client.get("/api/reconciliation").json()
+    explained = [l for l in r["lines"] if l["status"] == "EXPLAINED"]
+    assert explained
+    for line in explained:
+        assert line["expected_delta"] is not None
+        assert line["difference"] == pytest.approx(line["expected_delta"], abs=0.01)

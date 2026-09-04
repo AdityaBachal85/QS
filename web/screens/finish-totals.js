@@ -11,7 +11,7 @@
 
 import { api, fmt, openPanel, route } from '../app.js';
 import { createGrid } from '../grid.js';
-import { escapeHtml } from '../panel.js';
+import { escapeHtml, showContributors, wireTiles } from '../panel.js';
 
 const DASH = '<span class="muted">—</span>';
 // Square metres and running metres do not add. Rather than print a
@@ -32,16 +32,16 @@ route('/finish-totals', async (main) => {
     </div>
 
     <div class="tile-row">
-      <div class="tile"><div class="k">Finishing cost</div>
+      <div class="tile" data-tile="finishing"><div class="k">Finishing cost</div>
         <div class="v">${fmt.money(t.total)}</div>
         <div class="s">${fmt.int(t.line_count)} lines · ${t.unit_types} unit types</div></div>
-      <div class="tile"><div class="k">Doors &amp; windows</div>
+      <div class="tile" data-tile="openings"><div class="k">Doors &amp; windows</div>
         <div class="v">${fmt.money(t.openings_total)}</div>
         <div class="s">priced separately — see Doors &amp; Windows</div></div>
-      <div class="tile"><div class="k">Finishing + openings</div>
+      <div class="tile" data-tile="both"><div class="k">Finishing + openings</div>
         <div class="v">${fmt.money(t.total + t.openings_total)}</div>
         <div class="s">everything measured room by room</div></div>
-      <div class="tile"><div class="k">Per sq ft of carpet</div>
+      <div class="tile" data-tile="persqft"><div class="k">Per sq ft of carpet</div>
         <div class="v">${t.rate_per_carpet_sqft ? '₹' + fmt.n(t.rate_per_carpet_sqft, 0) : '—'}</div>
         <div class="s">${fmt.int(t.carpet_area_sqft)} sq ft carpet</div></div>
     </div>
@@ -69,6 +69,42 @@ route('/finish-totals', async (main) => {
       <div id="matrix"></div>
     </div>`;
 
+  wireTiles(main, {
+    finishing: {
+      title: 'Everything measured room by room',
+      value: fmt.money(t.total),
+      subtitle: `${fmt.int(t.line_count)} take-off lines across ${t.unit_types} unit types`,
+      rows: [...t.by_finish].filter(g => g.amount).sort((a, b) => b.amount - a.amount)
+        .slice(0, 10).map(g => [escapeHtml(g.label), fmt.money(g.amount)]),
+      note: `Every room in every unit type, priced through the rate library.
+        The three tables below are filters over these same lines, so none of
+        them can disagree with this figure or with each other.`,
+    },
+    openings: {
+      title: 'Doors, windows, railings and bays',
+      value: fmt.money(t.openings_total),
+      note: `Measured off the openings placed in rooms rather than off the room
+        finishes, which is why they are added here rather than folded in.
+        <a href="#/openings">See the schedule</a>.`,
+    },
+    both: {
+      title: 'Finishing and openings together',
+      value: fmt.money(t.total + t.openings_total),
+      expression: `${fmt.money(t.total)} + ${fmt.money(t.openings_total)}`,
+      note: `Everything measured room by room. Civil, MEP, Infra, Amenities and
+        Preliminaries are counted separately — see the
+        <a href="#/summary">Cost summary</a> for the project total.`,
+    },
+    persqft: {
+      title: 'Finishing per square foot of carpet',
+      value: t.rate_per_carpet_sqft ? `₹${fmt.n(t.rate_per_carpet_sqft, 0)}` : '—',
+      expression: `${fmt.money(t.total)} ÷ ${fmt.int(t.carpet_area_sqft)} sq ft`,
+      note: `Carpet area, not construction area — the two differ by about 2.5×,
+        and the workbook's own cost sheet divides by construction area. Reading
+        the wrong one gives a rate that looks plausible and is not.`,
+    },
+  });
+
   // -- totals per finish, for the whole building --------------------------
 
   const measured = t.by_finish.filter(g => g.quantity || g.amount);
@@ -80,7 +116,7 @@ route('/finish-totals', async (main) => {
         title: 'Blank when the group mixes units — square metres and running '
              + 'metres are not addable, so no total is offered.',
         render: (v, row) => (row.unit ? fmt.n(v, 2) : QTY_NOT_ADDABLE) },
-      { key: 'unit', label: 'Unit', kind: 'derived', width: '56px', align: 'left',
+      { key: 'unit', label: 'Unit', kind: 'note', width: '56px', align: 'left',
         render: v => v || DASH },
       { key: 'quantity_sqft', label: 'Sq ft', kind: 'derived', width: '118px',
         title: 'Areas only, converted with the project’s own factor of 10.764 — '
@@ -102,7 +138,7 @@ route('/finish-totals', async (main) => {
     ],
     rows: measured,
     rowKey: r => r.key,
-    onDerivedClick: row => showContributors(row, t.contributors[row.key] || []),
+    onDerivedClick: (row, col) => groupWorking(row, col, 'unit type', t.contributors),
     footer: rows => [
       '<strong>Total</strong>', '', '', '', '', '', '',
       `<strong>${fmt.money(rows.reduce((a, r) => a + r.amount, 0))}</strong>`,
@@ -118,7 +154,7 @@ route('/finish-totals', async (main) => {
         title: 'A room type carries flooring in square metres and skirting in '
              + 'running metres. Those do not add, so no single quantity is shown.',
         render: (v, row) => (row.unit ? fmt.n(v, 2) : QTY_NOT_ADDABLE) },
-      { key: 'unit', label: 'Unit', kind: 'derived', width: '56px', align: 'left',
+      { key: 'unit', label: 'Unit', kind: 'note', width: '56px', align: 'left',
         render: v => v || DASH },
       { key: 'quantity_sqft', label: 'Sq ft', kind: 'derived', width: '118px',
         render: v => (v ? fmt.int(v) : DASH) },
@@ -128,6 +164,7 @@ route('/finish-totals', async (main) => {
     ],
     rows: t.by_room_type.filter(g => g.amount > 0 || g.unpriced),
     rowKey: r => r.key,
+    onDerivedClick: (row, col) => groupWorking(row, col, 'unit type', t.contributors),
     footer: rows => ['<strong>Total</strong>', '', '', '', '',
                      `<strong>${fmt.money(rows.reduce((a, r) => a + r.amount, 0))}</strong>`],
   });
@@ -151,7 +188,7 @@ route('/finish-totals', async (main) => {
         { key: 'label', label: 'Finish — room type', kind: 'label', width: '330px' },
         { key: 'quantity', label: 'Quantity', kind: 'derived', width: '124px',
           render: (v, row) => (row.unit ? fmt.n(v, 2) : QTY_NOT_ADDABLE) },
-        { key: 'unit', label: 'Unit', kind: 'derived', width: '56px', align: 'left',
+        { key: 'unit', label: 'Unit', kind: 'note', width: '56px', align: 'left',
           render: v => v || DASH },
         { key: 'quantity_sqft', label: 'Sq ft', kind: 'derived', width: '112px',
           render: v => (v ? fmt.int(v) : DASH) },
@@ -162,6 +199,8 @@ route('/finish-totals', async (main) => {
       ],
       rows,
       rowKey: r => r.key,
+      onDerivedClick: (row, col) =>
+        groupWorking(row, col, 'unit type', t.contributors),
     });
   }
 
@@ -169,20 +208,80 @@ route('/finish-totals', async (main) => {
   drawMatrix();
 });
 
-// Which unit types make up one finish total. The answer to "where does the
-// building's 3.5 lakh sq ft of flooring actually sit".
-function showContributors(group, rows) {
-  const body = rows.map(r => `
-    <tr><td>${escapeHtml(r.label)}</td>
-        <td class="right mono">${fmt.n(r.quantity, 2)} ${escapeHtml(r.unit || '')}</td>
-        <td class="right mono">${fmt.money(r.amount)}</td></tr>`).join('');
+// Which unit types make up one total. The answer to "where does the building's
+// 3.5 lakh sq ft of flooring actually sit" -- and to the same question asked of
+// a room type, of a unit type, or of one cell of the matrix.
+function groupWorking(row, col, brokenDownBy, contributors) {
+  const rows = (contributors || {})[row.key] || [];
 
-  openPanel(`${group.label} — where it comes from`, `
-    <div class="deriv-value">${fmt.money(group.amount)}</div>
-    <div class="deriv-expr">${fmt.n(group.quantity, 2)} ${escapeHtml(group.unit || '')}${
-      group.quantity_sqft ? ` &nbsp;·&nbsp; ${fmt.int(group.quantity_sqft)} sq ft` : ''}</div>
-    <table class="kv"><tbody>${body}</tbody></table>
-    <div class="deriv-note">Each row is that unit type's share, already multiplied by
-      how many of it the building has. They are folds over the same take-off lines as
-      the per-room view, so the two always agree.</div>`);
+  if (col.key === 'blended_rate' || col.key === 'rate_per_sqft') {
+    const perSqft = col.key === 'rate_per_sqft';
+    const value = row[col.key];
+    if (value === null || value === undefined) {
+      openPanel(`${row.label} — ${perSqft ? '₹/sq ft' : 'rate'}`,
+        `<div class="deriv-note">${perSqft
+          ? 'No square-foot figure here — this group is not an area, so there is nothing to divide by.'
+          : 'This group mixes units. Square metres and running metres do not add, so there is no single quantity to divide the money by.'}</div>`);
+      return true;
+    }
+    showContributors(row, rows, {
+      title: perSqft ? '₹ per sq ft' : 'blended rate',
+      extra: `<div class="deriv-expr">${fmt.money(row.amount)} ÷ ${
+        perSqft ? `${fmt.int(row.quantity_sqft)} sq ft`
+                : `${fmt.n(row.quantity, 2)} ${escapeHtml(row.unit || '')}`} = ₹${
+        fmt.n(value, 2)}</div>`,
+      note: `A weighted average across every room in this group — it exists in no
+        rate list. ${perSqft ? `The money is always computed from the
+        square-metre pair; this is that same number presented the way a QS
+        reads it.` : `Rooms priced at different rates pull it about, which is
+        why the rows above are worth reading.`}`,
+    });
+    return true;
+  }
+
+  if (col.key === 'quantity_sqft') {
+    if (!row.quantity_sqft) {
+      openPanel(`${row.label} — sq ft`, `<div class="deriv-note">Areas only.
+        This group is measured in ${escapeHtml(row.unit || 'mixed units')}, and
+        a running metre does not convert to a square foot.</div>`);
+      return true;
+    }
+    showContributors(row, rows, {
+      title: 'square feet',
+      extra: `<div class="deriv-expr">${fmt.n(row.quantity, 2)} sq m × 10.764 = ${
+        fmt.int(row.quantity_sqft)} sq ft</div>`,
+      note: `Converted with the project's own factor of 10.764 — the workbook's
+        figure, not the exact 10.7639 — so this agrees with the sheet. The
+        conversion is a named parameter, not a number typed into a formula.`,
+    });
+    return true;
+  }
+
+  if (col.key === 'unpriced') {
+    showContributors(row, rows, {
+      title: `${row.unpriced} unpriced line${row.unpriced === 1 ? '' : 's'}`,
+      note: `Measured here and reaching no rate. The quantity is real; the
+        amount is missing, not zero.`,
+    });
+    return true;
+  }
+
+  if (['amount', 'quantity', 'lines'].includes(col.key)) {
+    if (col.key === 'quantity' && !row.unit) {
+      openPanel(`${row.label} — quantity`, `<div class="deriv-note">This group
+        mixes units — square metres and running metres — and those do not add.
+        Rather than print a confident 0.00, no total is offered. The money still
+        adds, because each line was priced in its own unit before being
+        summed.</div>`);
+      return true;
+    }
+    showContributors(row, rows, {
+      note: `Broken down by ${brokenDownBy}. Each row is already multiplied by
+        how many of that unit type the building has, and these are folds over
+        the same take-off lines as the per-room views — so the two always
+        agree.`,
+    });
+    return true;
+  }
+  return false;
 }
