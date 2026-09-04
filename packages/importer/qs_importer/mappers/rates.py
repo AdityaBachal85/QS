@@ -143,6 +143,11 @@ def map_rate_list(wb: Workbook, model: ProjectModel, ids: IdFactory,
     # pass. Until it is, a LINK is just another cell reference.
     item_by_row: dict[int, str] = {}
     pending_links: list[tuple[RateRevision, int, float | None, str]] = []
+    # Room types this sheet priced.  A block's dado rule depends on whether the
+    # same block prices a counter, and the counter row can come after the dado
+    # row, so the decision is made once the block has been read rather than
+    # while reading it.
+    touched: set[str] = set()
 
     for row in range(first_row, last_row + 1):
         marker = wb.text(sheet, f"{COL_MARKER}{row}")
@@ -235,9 +240,39 @@ def map_rate_list(wb: Workbook, model: ProjectModel, ids: IdFactory,
             qty_rule=slot.qty_rule or None, is_applicable=True,
             notes=f"from {sheet}!{COL_ITEM}{row}",
         ))
+        touched.add(current_room.id)
 
+    warnings.extend(_retarget_counter_measured(model, touched, slots))
     _resolve_links(pending_links, item_by_row, warnings)
     warnings.extend(merge_exact_duplicates(model))
+    return warnings
+
+
+def _retarget_counter_measured(model: ProjectModel, touched: set[str],
+                               slots: dict[str, FinishSlot]) -> list[str]:
+    """Point a counter-measured room's dado at its counters.
+
+    Decided per room type, after its whole block has been read: the Dado row
+    sits above the Kitchen Platform row in the rate list, so nothing can be
+    concluded from the dado row alone.
+    """
+    warnings: list[str] = []
+    by_slot = {s.id: s for s in slots.values()}
+    priced_a_counter = {
+        spec.room_type_id for spec in model.room_finish_specs
+        if by_slot.get(spec.finish_slot_id) is not None
+        and by_slot[spec.finish_slot_id].code in _COUNTER_SLOTS
+    }
+    for spec in model.room_finish_specs:
+        if spec.room_type_id not in touched & priced_a_counter:
+            continue
+        slot = by_slot.get(spec.finish_slot_id)
+        if slot is None or slot.code not in _COUNTER_QTY_RULE:
+            continue
+        spec.qty_rule = _COUNTER_QTY_RULE[slot.code]
+        spec.notes = (f"{spec.notes}. Measured off the counters rather than "
+                      f"the perimeter, because this room is priced for a "
+                      f"counter and that is where its dado runs.")
     return warnings
 
 
@@ -353,4 +388,25 @@ _DEFAULT_QTY_RULE: dict[str, str] = {
     "door_frames": "door_frame",
     "window_frames_internal": "window_frame",
     "window_frames_external": "window_frame",
+    "kitchen_platform": "kitchen_platform",
+    "service_platform": "service_platform",
+    "dado_below_kitchen_platform": "dado_below_platform",
 }
+
+#: Slots a counter-measured room measures differently from every other room.
+#:
+#: A kitchen's dado runs along its counters, not round its perimeter, so the
+#: quantity comes from the platform lengths. ``Internal Finishes Flats!E161``
+#: is ``(E171+E172)*D161`` where every other room's dado is perimeter x height.
+_COUNTER_QTY_RULE: dict[str, str] = {
+    "dado": "dado_above_platform",
+}
+
+#: What makes a room counter-measured: it is priced for a counter.
+#:
+#: Not its name and not its category. ``Internal Finishes Offices!E17`` is
+#: ``=E26*D17`` -- the office Pantry's dado comes off its service run exactly
+#: as a Kitchen's does, and the Pantry is categorised as habitable. Keying this
+#: on the schedule rather than on the word "Kitchen" is what makes a Servant
+#: Kitchen or a wet bar work with no code change (non-negotiable 5).
+_COUNTER_SLOTS = frozenset({"kitchen_platform", "service_platform"})

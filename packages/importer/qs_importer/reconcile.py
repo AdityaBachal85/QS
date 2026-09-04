@@ -221,6 +221,68 @@ def build_lines(result: ImportResult) -> list[Line]:
                           f"Summary!{cell}", expected_delta=delta,
                           explanation=explanation))
 
+    # -- The kitchen counters ---------------------------------------------
+    #
+    # A kitchen is measured off its counters, not its perimeter, and until now
+    # the platform measured neither: the four counter rows sat at zero while
+    # the workbook priced them at Rs 1.31 crore.  Three of the four now
+    # reproduce the workbook to the paisa.  The fourth does not, and the reason
+    # is stated here rather than absorbed into a tolerance.
+    from qs_engine.rules.takeoff import compute_takeoff
+
+    takeoff = compute_takeoff(model, params)
+
+    def priced(**match) -> float:
+        return sum(l.total_amount for l in takeoff if l.is_priced
+                   and all(getattr(l, k) == v for k, v in match.items()))
+
+    def book(*refs: str) -> float:
+        return sum(wb.number(*ref.split("!")) or 0.0 for ref in refs)
+
+    #: The three office Pantries whose carpet area and perimeter match no
+    #: take-off block.  The workbook has one Pantry block and applies it to all
+    #: 32 office units; three of the eight pantries are a different size, so
+    #: here they import unmeasured and are reported, rather than borrowing a
+    #: block that measures a different room (C-11).  12 units x 1.5 m of
+    #: counter, and 12 x 3.6 sq m of dado above it, at the workbook's own rates.
+    unmeasured_run_m = 18.0
+    unmeasured_dado_sqm = 43.2
+    office_counter_rate = (book("Internal Finishes Offices!F87")
+                           / (wb.number("Internal Finishes Offices", "D87") or 1.0))
+    office_dado_rate = (book("Internal Finishes Offices!F84")
+                        / (wb.number("Internal Finishes Offices", "D84") or 1.0))
+    pantry_note = (
+        "Three of the eight office Pantries are a different size from the one "
+        "Pantry block on Internal Finishes Offices, which the workbook applies "
+        "to all 32 office units regardless. They import unmeasured and are "
+        "reported as such, rather than taking their counters from a block that "
+        "measures a different room.")
+
+    lines.append(Line(
+        "Kitchen counters", "Main platform",
+        book("Internal Finishes Flats!F2013"),
+        priced(finish_name="Kitchen Platform"),
+        "Internal Finishes Flats!F2013 = SUMIF(R,I2013,P)"))
+    lines.append(Line(
+        "Kitchen counters", "Service platform",
+        book("Internal Finishes Flats!F2014", "Internal Finishes Offices!F87"),
+        priced(finish_name="Service Platform"),
+        "Internal Finishes Flats!F2014 + Internal Finishes Offices!F87",
+        expected_delta=-unmeasured_run_m * office_counter_rate,
+        explanation=pantry_note))
+    lines.append(Line(
+        "Kitchen counters", "Dado above the counter",
+        book("Internal Finishes Flats!F2011", "Internal Finishes Offices!F84"),
+        priced(qty_rule="dado_above_platform"),
+        "Internal Finishes Flats!F2011 + Internal Finishes Offices!F84",
+        expected_delta=-unmeasured_dado_sqm * office_dado_rate,
+        explanation=pantry_note))
+    lines.append(Line(
+        "Kitchen counters", "Dado below the counter",
+        book("Internal Finishes Flats!F2012"),
+        priced(finish_name="Dado Below Kitchen Platform"),
+        "Internal Finishes Flats!F2012 = SUMIF(R,I2012,P)"))
+
     # -- Module 4 ---------------------------------------------------------
     from qs_engine.model import BuildupMethod, RateRevision
     from qs_engine.rules.rate_buildup import build_rate

@@ -36,19 +36,55 @@ def test_every_room_with_a_schedule_produces_lines(lines):
     assert sum(1 for l in lines if l.is_priced) > 1000
 
 
+def workbook_finishing_total(wb) -> float:
+    """Every finish the workbook prices, off both of its summaries.
+
+    ``Internal Finishes Flats!F2040`` is the one printed total, and it covers
+    the flats sheet alone.  The offices are measured on a second sheet whose
+    summary has no total row at all -- Rs 70.18 lakh that nothing in the
+    workbook adds up.  The take-off here covers both, so comparing it against
+    F2040 alone was measuring the platform against three-quarters of the
+    building.
+
+    F2040 is also corrected for its own duplicate: row 2010 "Vitrified Skirt"
+    repeats row 1999 "Vitrfied Skirting - Flats" exactly -- same quantity, same
+    amount -- and F2040 counts both (C-15).
+    """
+    flats = (wb.number("Internal Finishes Flats", "F2040")
+             - wb.number("Internal Finishes Flats", "F2010"))
+    offices = sum(wb.number("Internal Finishes Offices", f"F{row}") or 0.0
+                  for row in range(FIRST_OFFICE_SUMMARY_ROW,
+                                   LAST_OFFICE_SUMMARY_ROW + 1))
+    return flats + offices
+
+
+#: ``Internal Finishes Offices!B78:B106`` -- the offices summary, which stops
+#: at the back-coat row and is never totalled.
+FIRST_OFFICE_SUMMARY_ROW = 78
+LAST_OFFICE_SUMMARY_ROW = 106
+
+
+def test_the_offices_are_a_second_summary_the_workbook_never_totals(wb):
+    """C-15's sibling: a whole sheet of finishes with no total row.
+
+    Stated as a figure so that comparing against the flats sheet alone cannot
+    quietly come back.
+    """
+    offices = sum(wb.number("Internal Finishes Offices", f"F{row}") or 0.0
+                  for row in range(FIRST_OFFICE_SUMMARY_ROW,
+                                   LAST_OFFICE_SUMMARY_ROW + 1))
+    assert offices == pytest.approx(7_018_179, abs=1)
+    assert wb.number("Internal Finishes Offices", "F107") is None, (
+        "if the offices sheet has grown a total row, use it instead of summing")
+
+
 def test_the_finishing_total_is_within_reach_of_the_workbook(
         lines, flat_height_lines, wb):
-    """Against `Internal Finishes Flats!F2040`, corrected for its own duplicate.
-
-    Row 2010 "Vitrified Skirt" repeats row 1999 "Vitrfied Skirting - Flats"
-    exactly -- same quantity, same amount -- and F2040 counts both (C-15).
-    """
-    printed = wb.number("Internal Finishes Flats", "F2040")
-    duplicate = wb.number("Internal Finishes Flats", "F2010")
-    corrected = printed - duplicate
+    """Against both finishing summaries, corrected for the duplicate in one."""
+    corrected = workbook_finishing_total(wb)
     got = total_amount(lines)
 
-    assert corrected == pytest.approx(215_044_617, abs=1)
+    assert corrected == pytest.approx(222_062_796, abs=1)
 
     # The workbook measures every wall at 3.1 m (`Internal Finishes Flats!D1`,
     # hard-coded per block); we measure each at its own floor's height.  That
@@ -59,6 +95,46 @@ def test_the_finishing_total_is_within_reach_of_the_workbook(
     assert residual == pytest.approx(corrected, rel=0.02), (
         f"platform {got:,.0f} less the floor-height effect gives "
         f"{residual:,.0f}, against corrected Excel {corrected:,.0f}")
+
+
+def test_the_counters_are_measured_and_reconcile_to_the_workbook(lines, wb):
+    """C-11, in the kitchen: Rs 1.31 crore of counters measured at nothing.
+
+    The four counter rows sat at zero -- no rate, no quantity -- while the
+    workbook priced them.  Three of the four now reproduce it to the paisa; the
+    fourth is short by the three office Pantries whose dimensions match no
+    take-off block, which is carried as a named line in ``reconcile.py``.
+    """
+    def priced(**match):
+        return sum(l.total_amount for l in lines if l.is_priced
+                   and all(getattr(l, k) == v for k, v in match.items()))
+
+    assert priced(finish_name="Kitchen Platform") == pytest.approx(
+        wb.number("Internal Finishes Flats", "F2013"), abs=0.01)
+    assert priced(finish_name="Dado Below Kitchen Platform") == pytest.approx(
+        wb.number("Internal Finishes Flats", "F2012"), abs=0.01)
+    # The flats' service counters, on their own, are exact too.
+    flats_service = sum(
+        l.total_amount for l in lines
+        if l.is_priced and l.finish_name == "Service Platform"
+        and l.room_type_name == "Kitchen")
+    assert flats_service == pytest.approx(
+        wb.number("Internal Finishes Flats", "F2014"), abs=0.01)
+
+
+def test_the_back_coat_behind_every_dado_is_a_measured_gap(wb):
+    """Rs 1.37 crore the platform does not yet carry, stated rather than lost.
+
+    ``Internal Finishes Flats!F2038`` prices a back coat behind the toilet,
+    kitchen, below-counter and lobby dados: ``D2038 = D2008+D2011+D2012+D2024``
+    at one rate.  There is no such finish slot here, so the platform is short
+    by it.  Asserted so the gap stays a known figure and not a surprise, and so
+    that adding the slot has to move this test on purpose.
+    """
+    assert wb.number("Internal Finishes Flats", "F2038") == pytest.approx(
+        13_597_259, abs=1)
+    assert wb.number("Internal Finishes Offices", "F106") == pytest.approx(
+        67_848, abs=1)
 
 
 def test_a_line_carries_its_quantity_its_rate_and_its_amount(lines):

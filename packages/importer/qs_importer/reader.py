@@ -19,6 +19,7 @@ from typing import Iterator
 
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.formula import ArrayFormula
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,11 @@ class StagingCell:
     @property
     def has_formula(self) -> bool:
         return isinstance(self.formula, str) and self.formula.startswith("=")
+
+    @property
+    def is_array_formula(self) -> bool:
+        """Excel's ``{=...}`` form. Reads exactly like any other formula here."""
+        return self.has_formula and self.formula.startswith("={")
 
     @property
     def is_populated(self) -> bool:
@@ -86,6 +92,13 @@ class Workbook:
                 value = v_sheet.cell(row=cell.row, column=cell.column).value
                 if formula is None and value is None:
                     continue
+                # An array formula arrives as an ArrayFormula object rather
+                # than a string. Testing only for str left those cells holding
+                # the object instead of their cached value, so every label
+                # written as an array formula read as blank -- half the kitchen
+                # take-off blocks lost their row names that way.
+                if isinstance(formula, ArrayFormula):
+                    formula = formula.text
                 is_formula = isinstance(formula, str) and formula.startswith("=")
                 ref = f"{get_column_letter(cell.column)}{cell.row}"
                 staged[ref] = StagingCell(

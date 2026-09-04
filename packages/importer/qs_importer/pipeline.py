@@ -15,6 +15,7 @@ from qs_engine.params import ParameterSet
 
 from .ids import IdFactory
 from .mappers.cost_lines import map_cost_lines
+from .mappers.kitchen import map_kitchen_platforms
 from .mappers.openings import map_openings
 from .mappers.rates import SHEET_FLATS, SHEET_OFFICE, map_rate_list
 from .mappers.room_conf import map_room_conf, new_model
@@ -42,6 +43,7 @@ class ImportResult:
             "finish specs": len(m.room_finish_specs),
             "cost sections": len(m.cost_sections),
             "cost lines": len(m.cost_lines),
+            "kitchen platforms": len(m.kitchen_platforms),
         }
 
 
@@ -62,4 +64,6 @@ def import_workbook(path: str | Path, *, params: ParameterSet | None = None) -> 
     # Infra, Amenities and Preliminary -- Rs 9.66 Cr the platform
     # has never seen, in the same Description/Unit/Qty/Rate shape.
     warnings += map_cost_lines(wb, model, ids)
+    # A kitchen is measured off its counters, not its perimeter.
+    warnings += map_kitchen_platforms(wb, model, ids)
     return ImportResult(model, params or ParameterSet.defaults(), wb, warnings)

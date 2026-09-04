@@ -216,6 +216,54 @@ class UnitTypeRoom:
     dado_height_m: float | None = None
 
 
+@dataclass
+class KitchenPlatform:
+    """The counters in a kitchen, and the tiling above and below them.
+
+    A kitchen is not measured like other rooms. Its dado does not run round the
+    perimeter -- it runs along the counters -- so the quantity comes from the
+    platform lengths, not from the room. ``Internal Finishes Flats!E161`` is
+    ``=(E171+E172)*D161``: the main platform plus the service platform, times
+    the height above.
+
+    Four values, all entered. The workbook derives the service platform as
+    ``E171-0.9``, which is a rule of thumb frozen into a formula; here it is
+    typed, because a kitchen with an L-shaped service run does not obey it.
+    """
+
+    id: str
+    unit_type_room_id: str
+    #: Main counter run, in metres.
+    main_platform_m: float = 0.0
+    #: Service counter run, in metres.
+    service_platform_m: float = 0.0
+    #: Tiling height above the counter.
+    dado_above_m: float = 0.0
+    #: Tiling height below it -- the counter's own height.
+    dado_below_m: float = 0.0
+
+    @property
+    def runs(self) -> tuple[tuple[str, float], ...]:
+        """Each counter as its own term, named.
+
+        Deliberately not a single total. ``(3 x 1.5) + (2 x 1.5)`` is what a QS
+        writes, and it is not the same statement as ``(3 + 2) x 1.5`` even
+        though the two agree today: the first survives the day a service
+        platform takes a different height, and the second forbids it. Every
+        rule that uses this folds over the terms and prints them the same way.
+
+        A counter with no run is not a counter of zero length -- it is a
+        counter the room does not have. An office pantry has a service run and
+        no main one, and printing ``(0 x 2.4)`` beside its real term would
+        state a measurement nobody took. Absence is not arithmetic: a room with
+        *no* run at all is unmeasured, and the rules raise rather than return
+        zero (non-negotiable 6).
+        """
+        return tuple((name, run) for name, run in
+                     (("main platform", self.main_platform_m),
+                      ("service platform", self.service_platform_m)) if run)
+
+
 # --------------------------------------------------------------------------
 # Finish schedule -- the generalisation of the Rate List block structure
 # --------------------------------------------------------------------------
@@ -509,6 +557,7 @@ class ProjectModel:
     room_finish_specs: list[RoomFinishSpec] = field(default_factory=list)
     opening_types: list[OpeningType] = field(default_factory=list)
     room_openings: list[RoomOpening] = field(default_factory=list)
+    kitchen_platforms: list[KitchenPlatform] = field(default_factory=list)
     rate_items: list[RateItem] = field(default_factory=list)
     rate_revisions: list[RateRevision] = field(default_factory=list)
     project_rates: list[ProjectRate] = field(default_factory=list)
@@ -544,6 +593,13 @@ class ProjectModel:
             (r for r in self.unit_type_rooms if r.unit_type_id == unit_type_id),
             key=lambda r: r.seq,
         )
+
+    def kitchen_platform(self, room_id: str) -> "KitchenPlatform | None":
+        """The counters in this room, if it has any."""
+        for platform in self.kitchen_platforms:
+            if platform.unit_type_room_id == room_id:
+                return platform
+        return None
 
     def openings_of(self, room_id: str) -> list[RoomOpening]:
         return [o for o in self.room_openings if o.unit_type_room_id == room_id]

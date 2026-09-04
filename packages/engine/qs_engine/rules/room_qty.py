@@ -248,13 +248,33 @@ def qty_wall_finish(room: UnitTypeRoom, model: ProjectModel, params: ParameterSe
     height, source = _clear_height(room, params, floor_height_m)
     slab = params["slab_allowance_m"]
     value = room.perimeter_m * (height - slab)
-    return derive(Quantity.of(value, "SQM"), "wall_finish",
-                  f"{room.perimeter_m:g} x ({height:g} - {slab:g})",
-                  [Input("perimeter_m", room.perimeter_m),
-                   Input("floor_to_floor_ht", height, source),
-                   Input("slab_allowance_m", slab, "parameter")],
-                  excel_ref="Internal Finishes Flats!E8 = D4*(D1-0.15)",
-                  note=f"height taken from the {source}")
+    expression = f"{room.perimeter_m:g} x ({height:g} - {slab:g})"
+    inputs = [Input("perimeter_m", room.perimeter_m),
+              Input("floor_to_floor_ht", height, source),
+              Input("slab_allowance_m", slab, "parameter")]
+    note = f"height taken from the {source}"
+    excel_ref = "Internal Finishes Flats!E8 = D4*(D1-0.15)"
+
+    # A kitchen's tiling runs along its counters, so the plastered wall is what
+    # is left once both dado areas are taken off. You do not plaster behind the
+    # tiles, and charging for both counts the same square metre twice.
+    platform = model.kitchen_platform(room.id)
+    if platform is not None and platform.runs:
+        tiled = 0.0
+        for rule, which in (("dado_above_platform", "above"),
+                            ("dado_below_platform", "below")):
+            area = QTY_RULES[rule](room, model, params).value.value
+            tiled += area
+            inputs.append(Input(f"less dado {which} the counter", -area,
+                                "tiled, so not plastered"))
+            expression += f" - {area:g}"
+        value -= tiled
+        note = (f"{note}. The dado is deducted because that strip is tiled, "
+                f"not plastered -- charging both would count it twice.")
+        excel_ref = "Internal Finishes Flats!E163 = (D158*D163)-(E161+E162)"
+
+    return derive(Quantity.of(value, "SQM"), "wall_finish", expression, inputs,
+                  excel_ref=excel_ref, note=note)
 
 
 def qty_dado(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet,
@@ -277,6 +297,125 @@ def qty_wall_above_dado(room: UnitTypeRoom, model: ProjectModel, params: Paramet
                   [Input("perimeter_m", room.perimeter_m),
                    Input("floor_to_floor_ht", height, source),
                    Input("dado_height_m", dado)])
+
+
+# --------------------------------------------------------------------------
+# The kitchen counters
+# --------------------------------------------------------------------------
+#
+# A kitchen is not measured like other rooms. Its dado runs along the counters,
+# not round the perimeter, so the quantity comes from the platform lengths:
+#
+#     Internal Finishes Flats!E161 = (E171+E172)*D161      above the counter
+#     Internal Finishes Flats!E162 = (E171+E172)*D162      below it
+#
+# Written here as one term per counter -- (3 x 1.5) + (2 x 1.5) -- rather than
+# factored. The two agree today and are not the same statement: this one
+# survives a service platform taking a different height, and it is the form a
+# QS writes, which is the form the derivation panel should show back.
+
+
+class MissingKitchenPlatformError(QtyRuleError):
+    """A kitchen with no counters entered.
+
+    Raised rather than returning zero. A kitchen genuinely has counters; a zero
+    here would mean "this kitchen costs nothing to fit out", which is the
+    C-11 failure -- measured work presented as free.
+    """
+
+
+def _platform(room: UnitTypeRoom, model: ProjectModel) -> "object":
+    platform = model.kitchen_platform(room.id)
+    if platform is None or not platform.runs:
+        raise MissingKitchenPlatformError(
+            f"{room.label or room.id!r} has no counters entered. Enter the main "
+            f"or service platform run on the Kitchen platforms tab -- a "
+            f"kitchen with no counters is unmeasured, not free.")
+    return platform
+
+
+def _run(room: UnitTypeRoom, model: ProjectModel, attribute: str,
+         name: str) -> float:
+    """One named counter run, refusing to report an unentered one as zero."""
+    length = getattr(_platform(room, model), attribute)
+    if not length:
+        raise MissingKitchenPlatformError(
+            f"{room.label or room.id!r} is priced for a {name} but none is "
+            f"entered. Enter its run on the Kitchen platforms tab -- an "
+            f"unmeasured counter is not a counter that costs nothing.")
+    return length
+
+
+def _dado_off_platform(room: UnitTypeRoom, model: ProjectModel,
+                       height: float, which: str) -> Derived:
+    """Fold over the counters, one term each, and keep the terms visible."""
+    platform = _platform(room, model)
+    total = 0.0
+    inputs: list[Input] = []
+    parts: list[str] = []
+    for name, run in platform.runs:
+        contribution = run * height
+        total += contribution
+        inputs.append(Input(name, run, "entered on the Kitchen platforms tab"))
+        parts.append(f"({run:g} x {height:g})")
+    inputs.append(Input(f"dado {which} the counter", height,
+                        "entered on the Kitchen platforms tab"))
+    return derive(
+        Quantity.of(total, "SQM"), f"dado_{which}_platform",
+        " + ".join(parts), inputs,
+        excel_ref=("Internal Finishes Flats!E161 = (E171+E172)*D161"
+                   if which == "above"
+                   else "Internal Finishes Flats!E162 = (E171+E172)*D162"),
+        note=f"Each counter is measured and the results added. The dado runs "
+             f"along the counters, not round the room, so the room's perimeter "
+             f"does not enter this at all.")
+
+
+def qty_kitchen_platform(room: UnitTypeRoom, model: ProjectModel,
+                         params: ParameterSet,
+                         floor_height_m: float | None = None) -> Derived:
+    """The main counter run."""
+    run = _run(room, model, "main_platform_m", "main platform")
+    return derive(Quantity.of(run, "RM"), "kitchen_platform",
+                  f"main platform = {run:g}",
+                  [Input("main platform", run,
+                         "entered on the Kitchen platforms tab")],
+                  excel_ref="Internal Finishes Flats!E171")
+
+
+def qty_service_platform(room: UnitTypeRoom, model: ProjectModel,
+                         params: ParameterSet,
+                         floor_height_m: float | None = None) -> Derived:
+    """The service counter run.
+
+    The workbook derives it as ``E171-0.9``. That is a rule of thumb frozen
+    into a formula, and an L-shaped service run does not obey it, so here it is
+    entered.
+    """
+    run = _run(room, model, "service_platform_m", "service platform")
+    return derive(Quantity.of(run, "RM"),
+                  "service_platform",
+                  f"service platform = {run:g}",
+                  [Input("service platform", run,
+                         "entered on the Kitchen platforms tab")],
+                  excel_ref="Internal Finishes Flats!E172 = E171-0.9",
+                  note="The workbook derives this from the main platform; here "
+                       "it is entered, because the relationship is a habit "
+                       "rather than a rule.")
+
+
+def qty_dado_above_platform(room: UnitTypeRoom, model: ProjectModel,
+                            params: ParameterSet,
+                            floor_height_m: float | None = None) -> Derived:
+    platform = _platform(room, model)
+    return _dado_off_platform(room, model, platform.dado_above_m, "above")
+
+
+def qty_dado_below_platform(room: UnitTypeRoom, model: ProjectModel,
+                            params: ParameterSet,
+                            floor_height_m: float | None = None) -> Derived:
+    platform = _platform(room, model)
+    return _dado_off_platform(room, model, platform.dado_below_m, "below")
 
 
 def _frame_qty(room: UnitTypeRoom, model: ProjectModel, params: ParameterSet,
@@ -320,6 +459,10 @@ QTY_RULES: dict[str, Callable[..., Derived]] = {
     "wall_above_dado": qty_wall_above_dado,
     "door_frame": qty_door_frame,
     "window_frame": qty_window_frame,
+    "kitchen_platform": qty_kitchen_platform,
+    "service_platform": qty_service_platform,
+    "dado_above_platform": qty_dado_above_platform,
+    "dado_below_platform": qty_dado_below_platform,
 }
 
 #: The rules whose quantity depends on the floor-to-floor height.  Flooring,
@@ -339,6 +482,11 @@ RULE_DEDUCTIONS: dict[str, str] = {
     "wall_above_dado": "none",
     "door_frame": "none",
     "window_frame": "none",
+    # Counters are measured as built; nothing interrupts a run of granite.
+    "kitchen_platform": "none",
+    "service_platform": "none",
+    "dado_above_platform": "none",
+    "dado_below_platform": "none",
 }
 
 
